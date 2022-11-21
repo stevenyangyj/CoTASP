@@ -22,7 +22,7 @@ def get_config():
     config.optim_configs.clip_method = 'global_clip'
     config.optim_configs.decay_coef = 1e-5
 
-    config.hidden_dims = (1024, 1024, 1024, 1024)
+    config.hidden_dims = (512, 512, 512, 512)
     config.name_activation = 'leaky_relu'
     config.use_layer_norm = False
     config.use_rms_norm = False
@@ -31,7 +31,7 @@ def get_config():
     config.s_start = 1/400.0
     config.s_end = 400.0
 
-    config.component_nums = 10
+    config.component_nums = 20
 
     config.alpha = 0.75 # 0.02 (hat); 0.75 (spc)
     config.init_temperature = 1.0

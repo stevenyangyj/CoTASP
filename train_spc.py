@@ -6,7 +6,6 @@ Encoding prompts via online dictionary learning
 Sparse Prompt Coding (SPC)
 '''
 
-import os
 import random
 import time
 
@@ -21,12 +20,12 @@ from jaxrl.evaluation import evaluate_cl
 from jaxrl.utils import Logger
 
 from jaxrl.agents.sac.sac_learner import SPCLearner
-import continual_world as cw
+from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('env_name', 'cw20', 'Environment name.')
-flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/MORE/src/jaxrl/logs/', 'Tensorboard logging dir.')
+flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/SPC/logs', 'Logging dir.')
 flags.DEFINE_integer('seed', 8, 'Random seed.')
 flags.DEFINE_string('base_algo', 'spc', 'base learning algorithm')
 
@@ -54,7 +53,7 @@ config_flags.DEFINE_config_file(
 
 def main(_):
     # config tasks
-    seq_tasks = cw.TASK_SEQS[FLAGS.env_name]
+    seq_tasks = TASK_SEQS[FLAGS.env_name]
 
     kwargs = dict(FLAGS.config)
     algo = FLAGS.base_algo
@@ -80,15 +79,15 @@ def main(_):
     random.seed(FLAGS.seed)
 
     # initialize SAC agent
-    temp_env = cw.get_single_env(
-        cw.TASK_SEQS[FLAGS.env_name][0], 
+    temp_env = get_single_env(
+        TASK_SEQS[FLAGS.env_name][0], 
         FLAGS.seed, randomization='deterministic')
     if algo == 'spc':
         agent = SPCLearner(
             FLAGS.seed,
             temp_env.observation_space.sample()[np.newaxis],
             temp_env.action_space.sample()[np.newaxis], 
-            len(cw.TASK_SEQS[FLAGS.env_name]),
+            len(TASK_SEQS[FLAGS.env_name]),
             FLAGS.max_steps,
             FLAGS.start_training,
             FLAGS.finetune_steps,
@@ -100,7 +99,7 @@ def main(_):
     # continual learning loop
     eval_envs = []
     for task in seq_tasks:
-        eval_envs.append(cw.get_single_env(task, FLAGS.seed, randomization='deterministic'))
+        eval_envs.append(get_single_env(task, FLAGS.seed, randomization='deterministic'))
 
     total_env_steps = 0
     for task_idx, task in enumerate(seq_tasks):
@@ -110,7 +109,7 @@ def main(_):
         Learning subroutine for the current task
         '''
         # set continual world environment
-        env = cw.get_single_env(task, FLAGS.seed, randomization='deterministic')
+        env = get_single_env(task, FLAGS.seed, randomization='deterministic')
 
         # reset replay buffer
         replay_buffer = ReplayBuffer(env.observation_space, env.action_space,
