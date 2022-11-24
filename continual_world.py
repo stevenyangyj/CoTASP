@@ -17,16 +17,16 @@ def get_mt50() -> metaworld.MT50:
 
 TASK_SEQS = {
     "cw10": [
-        "hammer-v1",
-        "push-wall-v1",
-        "faucet-close-v1",
-        "push-back-v1",
-        "stick-pull-v1",
-        "handle-press-side-v1",
-        "push-v1",
-        "shelf-place-v1",
-        "window-close-v1",
-        "peg-unplug-side-v1",
+        {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
+        {'task': "push-wall-v1", 'hint': 'Bypass a wall and push a puck to a goal.'},
+        {'task': "faucet-close-v1", 'hint': 'Rotate the faucet clockwise.'},
+        {'task': "push-back-v1", 'hint': 'Pull a puck to a goal.'},
+        {'task': "stick-pull-v1", 'hint': 'Grasp a stick and pull a box with the stick.'},
+        {'task': "handle-press-side-v1", 'hint': 'Press a handle down sideways.'},
+        {'task': "push-v1", 'hint': 'Push the puck to a goal.'},
+        {'task': "shelf-place-v1", 'hint': 'pick and place a puck onto a shelf.'},
+        {'task': "window-close-v1", 'hint': 'Push and close a window.'},
+        {'task': "peg-unplug-side-v1", 'hint': 'Unplug a peg sideways.'},
     ],
     "cw1-hammer": [
         "hammer-v1"
@@ -38,13 +38,13 @@ TASK_SEQS = {
         "push-v1"
     ],
     "cw2-test": [
-        "hammer-v1",
-        "stick-pull-v1",
+        {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
+        {'task': "stick-pull-v1", 'hint': 'Grasp a stick and pull a box with the stick.'}
     ],
     "cw3-test": [
-        "hammer-v1",
-        "stick-pull-v1",
-        "push-back-v1"
+        {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
+        {'task': "stick-pull-v1", 'hint': 'Grasp a stick and pull a box with the stick.'},
+        {'task': "push-back-v1", 'hint': 'Pull a puck to a goal.'}
     ]
 }
 

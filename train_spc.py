@@ -98,18 +98,18 @@ def main(_):
 
     # continual learning loop
     eval_envs = []
-    for task in seq_tasks:
-        eval_envs.append(get_single_env(task, FLAGS.seed, randomization='deterministic'))
+    for dict_t in seq_tasks:
+        eval_envs.append(get_single_env(dict_t['task'], FLAGS.seed, randomization='deterministic'))
 
     total_env_steps = 0
-    for task_idx, task in enumerate(seq_tasks):
-        print(f'Learning on task {task_idx+1}: {task} for {FLAGS.max_steps} steps')
+    for task_idx, dict_t in enumerate(seq_tasks):
+        print(f'Learning on task {task_idx+1}: {dict_t["task"]} for {FLAGS.max_steps} steps')
 
         '''
         Learning subroutine for the current task
         '''
         # set continual world environment
-        env = get_single_env(task, FLAGS.seed, randomization='deterministic')
+        env = get_single_env(dict_t['task'], FLAGS.seed, randomization='deterministic')
 
         # reset replay buffer
         replay_buffer = ReplayBuffer(env.observation_space, env.action_space,

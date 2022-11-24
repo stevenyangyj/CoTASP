@@ -860,7 +860,7 @@ class HATSACLearner(SACLearner):
 
 
 @functools.partial(jax.jit, static_argnames=('backup_entropy', 'finetune', 'first_task'))
-def _update_hate_jit(
+def _update_spc_jit(
     rng: PRNGKey, task_id: int, coder: Model, s_end: float, s: float, cum_mask: Params, 
     pms_mask: Params, comp_emb: FrozenDict, thres_emb: float, alpha: float, actor: Model, 
     critic: Model, target_critic: Model, temp: Model, batch: Batch, discount: float, tau: float,
@@ -1158,7 +1158,7 @@ class SPCLearner(SACLearner):
         self.step += 1
         self.s = self.s_scdr(self.step)
 
-        new_rng, new_coder, new_actor, new_critic, new_target_critic, new_temp, info = _update_hate_jit(
+        new_rng, new_coder, new_actor, new_critic, new_target_critic, new_temp, info = _update_spc_jit(
             rng=self.rng, task_id=task_id, coder=self.coder, s_end=self.s_end, s=self.s, cum_mask=self.mask_cum, 
             pms_mask=self.mask_prm, comp_emb=freeze(self.dict_component['cbl']), thres_emb=self.thres_emb, 
             alpha=self.alpha, actor=self.actor, critic=self.critic, target_critic=self.target_critic, 
