@@ -43,6 +43,28 @@ def flattened_traversal(fn):
     return mask
 
 
+def create_mask(params, trainable_names):
+    def _map(params, mask, names):
+        for k in params:
+            if k.split('_')[0] in names:
+                mask[k] = 'train'
+            else:
+                mask[k] = 'fix'
+
+    mask = {}
+    _map(params, mask, trainable_names)
+    return freeze(mask)
+
+
+def zero_grads():
+    # from https://github.com/deepmind/optax/issues/159#issuecomment-896459491
+    def init_fn(_): 
+        return ()
+    def update_fn(updates, state, params=None):
+        return jax.tree_util.tree_map(jnp.zeros_like, updates), ()
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
 PRNGKey = Any
 Params = flax.core.FrozenDict[str, Any]
 PRNGKey = Any
@@ -305,6 +327,132 @@ class Model:
             f.write(flax.serialization.to_bytes(self.params))
 
     def load(self, load_path: str) -> 'Model':
+        with open(load_path, 'rb') as f:
+            params = flax.serialization.from_bytes(self.params, f.read())
+        return self.replace(params=params)
+
+
+@flax.struct.dataclass
+class AlterTrainableModel:
+    step: int
+    apply_fn: Callable[..., Any] = flax.struct.field(pytree_node=False)
+    params: Params
+    optimizer_one: Optional[optax.GradientTransformation] = flax.struct.field(
+        pytree_node=False)
+    optimizer_two: Optional[optax.GradientTransformation] = flax.struct.field(
+        pytree_node=False)
+    opt_state_one: Optional[optax.OptState] = None
+    opt_state_two: Optional[optax.OptState] = None
+
+    @classmethod
+    def create(cls,
+               model_def: nn.Module,
+               inputs: Sequence[jnp.ndarray],
+               params_list_one: list = None,
+               params_list_two: list = None,
+               optimizer_one: Optional[optax.GradientTransformation] = None,
+               optimizer_two: Optional[optax.GradientTransformation] = None,
+               ) -> 'AlterTrainableModel':
+        variables = model_def.init(*inputs)
+
+        _, params = variables.pop('params')
+
+        # the first set of trainable params
+        tx_one = optax.multi_transform({'train': optimizer_one, 'fix': optax.set_to_zero()},
+            create_mask(params, params_list_one))
+        opt_state_one = tx_one.init(params)
+
+        # another set of trainable param
+        tx_two = optax.multi_transform({'train': optimizer_two, 'fix': optax.set_to_zero()},
+            create_mask(params, params_list_two))
+        opt_state_two = tx_two.init(params)
+
+        return cls(step=1,
+                   apply_fn=model_def.apply,
+                   params=params,
+                   optimizer_one=tx_one,
+                   optimizer_two=tx_two,
+                   opt_state_one=opt_state_one,
+                   opt_state_two=opt_state_two)
+
+    def __call__(self, *args, **kwargs):
+        return self.apply_fn({'params': self.params}, *args, **kwargs)
+
+    def apply_gradient_one(
+            self,
+            loss_fn: Optional[Callable[[Params], Any]] = None,
+            grads: Optional[Any] = None,
+            has_aux: bool = True
+            ) -> Union[Tuple['AlterTrainableModel', Any], 'AlterTrainableModel']:
+
+        if grads is None:
+            grad_fn = jax.grad(loss_fn, has_aux=has_aux)
+            if has_aux:
+                _grads, aux = grad_fn(self.params)
+            else:
+                _grads = grad_fn(self.params)
+        else:
+            _grads = grads
+
+        updates, new_opt_state = self.optimizer_one.update(_grads, 
+            self.opt_state_one, self.params)
+        new_params = optax.apply_updates(self.params, updates)
+
+        new_model = self.replace(step=self.step + 1,
+                                 params=new_params,
+                                 opt_state_one=new_opt_state)
+        if has_aux:
+            return new_model, aux
+        else:
+            return new_model
+
+    def apply_gradient_two(
+            self,
+            loss_fn: Optional[Callable[[Params], Any]] = None,
+            grads: Optional[Any] = None,
+            has_aux: bool = True
+            ) -> Union[Tuple['AlterTrainableModel', Any], 'AlterTrainableModel']:
+
+        if grads is None:
+            grad_fn = jax.grad(loss_fn, has_aux=has_aux)
+            if has_aux:
+                _grads, aux = grad_fn(self.params)
+            else:
+                _grads = grad_fn(self.params)
+        else:
+            _grads = grads
+
+        updates, new_opt_state = self.optimizer_two.update(_grads, 
+            self.opt_state_two, self.params)
+        new_params = optax.apply_updates(self.params, updates)
+
+        new_model = self.replace(step=self.step + 1,
+                                 params=new_params,
+                                 opt_state_two=new_opt_state)
+        if has_aux:
+            return new_model, aux
+        else:
+            return new_model
+
+    def update_params(self, new_params: Params) -> 'AlterTrainableModel':
+        return self.replace(params=new_params)
+    
+    def reset_optimizer(self) -> 'AlterTrainableModel':
+        
+        # contain the count argument
+        opt_state_one = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x),
+                                                self.opt_state_one)
+        opt_state_two = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x),
+                                                self.opt_state_two)
+        return self.replace(opt_state_one=opt_state_one,
+                            opt_state_two=opt_state_two)
+
+    def save(self, save_path: str):
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        with open(save_path, 'wb') as f:
+            f.write(flax.serialization.to_bytes(self.params))
+
+    def load(self, load_path: str) -> 'AlterTrainableModel':
         with open(load_path, 'rb') as f:
             params = flax.serialization.from_bytes(self.params, f.read())
         return self.replace(params=params)

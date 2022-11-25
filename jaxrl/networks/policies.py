@@ -13,10 +13,11 @@ from tensorflow_probability.substrates import jax as tfp
 tfd = tfp.distributions
 tfb = tfp.bijectors
 
-from jaxrl.networks.common import MLP, Params, PRNGKey, \
-    default_init, activation_fn, RMSNorm
+# from jaxrl.networks.common import MLP, Params, PRNGKey, \
+#     default_init, activation_fn, RMSNorm
 
-# from common import MLP, Params, PRNGKey, default_init, activation_fn, RMSNorm
+from common import MLP, Params, PRNGKey, default_init, \
+    activation_fn, RMSNorm, create_mask, zero_grads
 
 LOG_STD_MIN = -10.0
 LOG_STD_MAX = 2.0
@@ -310,7 +311,7 @@ class HatTanhPolicy(nn.Module):
     final_fc_init_scale: float = 1.0
     log_std_min: Optional[float] = None
     log_std_max: Optional[float] = None
-    tanh_squash_distribution: bool = True
+    tanh_squash: bool = True
 
     def setup(self):
         if self.use_layer_norm and self.use_rms_norm:
@@ -318,7 +319,7 @@ class HatTanhPolicy(nn.Module):
 
         self.backbones = [nn.Dense(hidn, kernel_init=default_init()) \
             for hidn in self.hidden_dims]
-        self.embeds_bb = [nn.Embed(self.task_num, hidn, embedding_init=nn.initializers.normal(1.0)) \
+        self.embeds_bb = [nn.Embed(self.task_num, hidn, embedding_init=jax.nn.initializers.zeros) \
             for hidn in self.hidden_dims]
         
         self.mean_layer = nn.Dense(
@@ -363,7 +364,7 @@ class HatTanhPolicy(nn.Module):
         
         means = self.mean_layer(x)
 
-        if not self.tanh_squash_distribution:
+        if not self.tanh_squash:
             means = nn.tanh(means)
 
         if self.state_dependent_std:
@@ -384,7 +385,7 @@ class HatTanhPolicy(nn.Module):
         # numerically stable method
         base_dist = tfd.Normal(loc=means, scale=jnp.exp(log_stds) * temperature)
 
-        if self.tanh_squash_distribution:
+        if self.tanh_squash:
             return tfd.Independent(TanhTransformedDistribution(base_dist), 
                                    reinterpreted_batch_ndims=1), {'masks': masks, 'means': means}
         else:
@@ -610,20 +611,27 @@ def sample_actions(
 
 
 if __name__ == "__main__":
+    import optax
 
     actor = HatTanhPolicy(
         hidden_dims=(256, 256, 256, 256),
         action_dim=4,
-        task_num=3,
-        use_layer_norm=False)
+        task_num=20,
+        use_layer_norm=False,
+        use_rms_norm=False)
     
     rng, key = random.split(random.PRNGKey(0))
     variables = actor.init(
         key, jnp.ones((1, 12)), jnp.array([0])
     )
     _, params = variables.pop('params')
-    apply_jit = jax.jit(actor.apply)
-    dist, dicts = apply_jit(variables, jnp.ones((3, 12)), jnp.array([0]), 1e-5)
+
+    tx = optax.multi_transform({'train': optax.adam(0.1), 'fix': optax.set_to_zero()},
+        create_mask(params, ['backbones', 'mean', 'log']))
+    opt_state = tx.init(params)
+
+    # apply_jit = jax.jit(actor.apply)
+    # dist, dicts = apply_jit(variables, jnp.ones((3, 12)), jnp.array([0]), 1e-5)
 
     # def get_grad_masks(actor, masks):
     #     g_masks = actor.get_grad_masks(masks)
@@ -631,13 +639,18 @@ if __name__ == "__main__":
     # get_grad_masks_jit = jax.jit(nn.apply(get_grad_masks, actor))
     # grad_masks = get_grad_masks_jit(variables, masks)
 
-    # def loss(params):
-    #     dist, _ = actor.apply({'params': params}, jnp.ones((3, 12)), jnp.array([0]))
-    #     samples = dist.sample(seed=random.PRNGKey(0))
-    #     return jnp.sum(samples)
+    def loss(params):
+        dist, _ = actor.apply({'params': params}, jnp.ones((3, 12)), jnp.array([0]))
+        samples = dist.sample(seed=random.PRNGKey(0))
+        return jnp.sum(samples)
 
-    # grads = jax.grad(loss)(params)
-    
+    grads = jax.grad(loss)(params)
+
+    updates, opt_state = tx.update(grads, opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+
+    compares = jax.tree_util.tree_map(lambda x, y: x == y, params, new_params)
+    print(compares)
     # for k in grad_masks.keys():
     #     print(k)
     #     if k == 'mean_layer':
@@ -646,7 +659,7 @@ if __name__ == "__main__":
     #         assert (grads[k]['kernel'].shape == grad_masks[k]['kernel'].shape)
     #         assert (grads[k]['bias'].shape == grad_masks[k]['bias'].shape)
 
-    print(dicts['masks'])
+    # print(dicts['masks'])
 
     # @jax.jit
     # def top_k_fn(data):
