@@ -31,7 +31,7 @@ flags.DEFINE_string('base_algo', 'spc', 'base learning algorithm')
 
 flags.DEFINE_integer('eval_episodes', 1, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
-flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
+flags.DEFINE_integer('eval_interval', 5000, 'Eval interval.')
 flags.DEFINE_integer('batch_size', 128, 'Mini batch size.')
 flags.DEFINE_integer('updates_per_step', 1, 'Gradient updates per step.')
 flags.DEFINE_integer('max_steps', int(1e6), 'Number of training steps for each task')
@@ -41,7 +41,7 @@ flags.DEFINE_integer('finetune_steps', int(5e4), 'Number of finetune steps for t
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 
 flags.DEFINE_boolean('tqdm', False, 'Use tqdm progress bar.')
-flags.DEFINE_string('wandb_mode', 'online', 'Track experiments with Weights and Biases.')
+flags.DEFINE_string('wandb_mode', 'disabled', 'Track experiments with Weights and Biases.')
 flags.DEFINE_string('wandb_project_name', "jaxrl_spc", "The wandb's project name.")
 flags.DEFINE_string('wandb_entity', None, "the entity (team) of wandb's project")
 config_flags.DEFINE_config_file(
@@ -80,7 +80,7 @@ def main(_):
 
     # initialize SAC agent
     temp_env = get_single_env(
-        TASK_SEQS[FLAGS.env_name][0], 
+        TASK_SEQS[FLAGS.env_name][0]['task'], 
         FLAGS.seed, randomization='deterministic')
     if algo == 'spc':
         agent = SPCLearner(
@@ -108,6 +108,9 @@ def main(_):
         '''
         Learning subroutine for the current task
         '''
+        # start the current task
+        agent.start_task(task_idx, dict_t["hint"])
+
         # set continual world environment
         env = get_single_env(dict_t['task'], FLAGS.seed, randomization='deterministic')
 
@@ -146,7 +149,7 @@ def main(_):
                 for _ in range(FLAGS.updates_per_step):
                     batch = replay_buffer.sample(FLAGS.batch_size)
                     update_info = agent.update(task_idx, batch)
-
+                breakpoint()
                 if i % FLAGS.log_interval == 0:
                     for k, v in update_info.items():
                         wandb.log({f'training/{k}': v, 'global_steps': total_env_steps})

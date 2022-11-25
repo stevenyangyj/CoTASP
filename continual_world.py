@@ -24,7 +24,7 @@ TASK_SEQS = {
         {'task': "stick-pull-v1", 'hint': 'Grasp a stick and pull a box with the stick.'},
         {'task': "handle-press-side-v1", 'hint': 'Press a handle down sideways.'},
         {'task': "push-v1", 'hint': 'Push the puck to a goal.'},
-        {'task': "shelf-place-v1", 'hint': 'pick and place a puck onto a shelf.'},
+        {'task': "shelf-place-v1", 'hint': 'Pick and place a puck onto a shelf.'},
         {'task': "window-close-v1", 'hint': 'Push and close a window.'},
         {'task': "peg-unplug-side-v1", 'hint': 'Unplug a peg sideways.'},
     ],

@@ -13,11 +13,11 @@ from tensorflow_probability.substrates import jax as tfp
 tfd = tfp.distributions
 tfb = tfp.bijectors
 
-# from jaxrl.networks.common import MLP, Params, PRNGKey, \
-#     default_init, activation_fn, RMSNorm
+from jaxrl.networks.common import MLP, Params, PRNGKey, \
+    default_init, activation_fn, RMSNorm
 
-from common import MLP, Params, PRNGKey, default_init, \
-    activation_fn, RMSNorm, create_mask, zero_grads
+# from common import MLP, Params, PRNGKey, default_init, \
+#     activation_fn, RMSNorm, create_mask, zero_grads
 
 LOG_STD_MIN = -10.0
 LOG_STD_MAX = 2.0
@@ -338,7 +338,7 @@ class HatTanhPolicy(nn.Module):
                 (self.action_dim,)
             )
 
-        self.gate = nn.sigmoid
+        self.ste = lambda x: jnp.minimum(jnp.maximum(x, 0), 1.)
         self.activation = activation_fn(self.name_activation)
         if self.use_layer_norm:
             self.normalizer = nn.LayerNorm(use_bias=False, use_scale=False)
@@ -350,12 +350,12 @@ class HatTanhPolicy(nn.Module):
     def __call__(self,
                  x: jnp.ndarray,
                  t: jnp.ndarray,
-                 s: float = 1.0,
                  temperature: float = 1.0):
         masks = {}
         for i, layer in enumerate(self.backbones):
             x = layer(x)
-            g = self.gate(self.embeds_bb[i](t) * s)
+            # straight-through estimator
+            g = self.ste(self.embeds_bb[i](t))
             masks[layer.name] = {'embedding': g}
             x = self.activation(x)
             x = x * jnp.broadcast_to(g, x.shape)
@@ -626,9 +626,9 @@ if __name__ == "__main__":
     )
     _, params = variables.pop('params')
 
-    tx = optax.multi_transform({'train': optax.adam(0.1), 'fix': optax.set_to_zero()},
-        create_mask(params, ['backbones', 'mean', 'log']))
-    opt_state = tx.init(params)
+    # tx = optax.multi_transform({'train': optax.adam(0.1), 'fix': optax.set_to_zero()},
+    #     create_mask(params, ['backbones', 'mean', 'log']))
+    # opt_state = tx.init(params)
 
     # apply_jit = jax.jit(actor.apply)
     # dist, dicts = apply_jit(variables, jnp.ones((3, 12)), jnp.array([0]), 1e-5)
@@ -639,18 +639,18 @@ if __name__ == "__main__":
     # get_grad_masks_jit = jax.jit(nn.apply(get_grad_masks, actor))
     # grad_masks = get_grad_masks_jit(variables, masks)
 
-    def loss(params):
-        dist, _ = actor.apply({'params': params}, jnp.ones((3, 12)), jnp.array([0]))
-        samples = dist.sample(seed=random.PRNGKey(0))
-        return jnp.sum(samples)
+    # def loss(params):
+    #     dist, _ = actor.apply({'params': params}, jnp.ones((3, 12)), jnp.array([0]))
+    #     samples = dist.sample(seed=random.PRNGKey(0))
+    #     return jnp.sum(samples)
 
-    grads = jax.grad(loss)(params)
+    # grads = jax.grad(loss)(params)
 
-    updates, opt_state = tx.update(grads, opt_state, params)
-    new_params = optax.apply_updates(params, updates)
+    # updates, opt_state = tx.update(grads, opt_state, params)
+    # new_params = optax.apply_updates(params, updates)
 
-    compares = jax.tree_util.tree_map(lambda x, y: x == y, params, new_params)
-    print(compares)
+    # compares = jax.tree_util.tree_map(lambda x, y: x == y, params, new_params)
+    # print(compares)
     # for k in grad_masks.keys():
     #     print(k)
     #     if k == 'mean_layer':

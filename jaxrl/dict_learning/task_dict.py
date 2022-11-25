@@ -8,8 +8,6 @@ from sklearn.decomposition import DictionaryLearning, sparse_encode
 from sklearn.linear_model import Lasso
 from sklearn.utils import check_array, check_random_state
 
-from plot_utils import heatmap, annotate_heatmap
-
 
 def _update_dict(
     dictionary,
@@ -338,6 +336,8 @@ class OnlineDictLearnerV2(object):
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from sentence_transformers import SentenceTransformer
+
+    from plot_utils import heatmap, annotate_heatmap
 
     model = SentenceTransformer('all-MiniLM-L12-v2')
 

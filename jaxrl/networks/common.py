@@ -438,7 +438,6 @@ class AlterTrainableModel:
         return self.replace(params=new_params)
     
     def reset_optimizer(self) -> 'AlterTrainableModel':
-        
         # contain the count argument
         opt_state_one = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x),
                                                 self.opt_state_one)
