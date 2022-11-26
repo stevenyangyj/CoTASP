@@ -103,15 +103,16 @@ class TanhTransformedDistribution(tfd.TransformedDistribution):
 class NormalTanhPolicy(nn.Module):
     hidden_dims: Sequence[int]
     action_dim: int
-    state_dependent_std: bool = True
     name_activation: str = 'leaky_relu'
-    use_layer_norm: bool = True
-    dropout_rate: Optional[float] = None
+    use_rms_norm: bool = False
+    use_layer_norm: bool = False
+    state_dependent_std: bool = True
     final_fc_init_scale: float = 1.0
     log_std_min: Optional[float] = None
     log_std_max: Optional[float] = None
-    tanh_squash_distribution: bool = True
+    dropout_rate: Optional[float] = None
     init_mean: Optional[jnp.ndarray] = None
+    tanh_squash: bool = True
 
     @nn.compact
     def __call__(self,
@@ -126,7 +127,7 @@ class NormalTanhPolicy(nn.Module):
 
         means = nn.Dense(self.action_dim,
                          kernel_init=default_init(
-                             self.final_fc_init_scale))(outputs)
+                         self.final_fc_init_scale))(outputs)
         if self.init_mean is not None:
             means += self.init_mean
 
@@ -136,19 +137,19 @@ class NormalTanhPolicy(nn.Module):
                                     self.final_fc_init_scale))(outputs)
         else:
             log_stds = self.param('log_stds', nn.initializers.zeros,
-                                  (self.action_dim, ))
+                                  (self.action_dim,))
 
         log_std_min = self.log_std_min or LOG_STD_MIN
         log_std_max = self.log_std_max or LOG_STD_MAX
         log_stds = jnp.clip(log_stds, log_std_min, log_std_max)
 
-        if not self.tanh_squash_distribution:
+        if not self.tanh_squash:
             means = nn.tanh(means)
 
         base_dist = tfd.MultivariateNormalDiag(loc=means,
                                                scale_diag=jnp.exp(log_stds) *
                                                temperature)
-        if self.tanh_squash_distribution:
+        if self.tanh_squash:
             return tfd.TransformedDistribution(distribution=base_dist,
                                                bijector=tfb.Tanh())
         else:

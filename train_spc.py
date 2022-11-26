@@ -24,14 +24,14 @@ from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'cw20', 'Environment name.')
+flags.DEFINE_string('env_name', 'cw10', 'Environment name.')
 flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/SPC/logs', 'Logging dir.')
 flags.DEFINE_integer('seed', 8, 'Random seed.')
 flags.DEFINE_string('base_algo', 'spc', 'base learning algorithm')
 
 flags.DEFINE_integer('eval_episodes', 1, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
-flags.DEFINE_integer('eval_interval', 5000, 'Eval interval.')
+flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
 flags.DEFINE_integer('batch_size', 128, 'Mini batch size.')
 flags.DEFINE_integer('updates_per_step', 1, 'Gradient updates per step.')
 flags.DEFINE_integer('max_steps', int(1e6), 'Number of training steps for each task')
@@ -41,7 +41,7 @@ flags.DEFINE_integer('finetune_steps', int(5e4), 'Number of finetune steps for t
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 
 flags.DEFINE_boolean('tqdm', False, 'Use tqdm progress bar.')
-flags.DEFINE_string('wandb_mode', 'disabled', 'Track experiments with Weights and Biases.')
+flags.DEFINE_string('wandb_mode', 'online', 'Track experiments with Weights and Biases.')
 flags.DEFINE_string('wandb_project_name', "jaxrl_spc", "The wandb's project name.")
 flags.DEFINE_string('wandb_entity', None, "the entity (team) of wandb's project")
 config_flags.DEFINE_config_file(
@@ -89,7 +89,6 @@ def main(_):
             temp_env.action_space.sample()[np.newaxis], 
             len(TASK_SEQS[FLAGS.env_name]),
             FLAGS.max_steps,
-            FLAGS.start_training,
             FLAGS.finetune_steps,
             **kwargs)
         del temp_env
@@ -149,7 +148,6 @@ def main(_):
                 for _ in range(FLAGS.updates_per_step):
                     batch = replay_buffer.sample(FLAGS.batch_size)
                     update_info = agent.update(task_idx, batch)
-                breakpoint()
                 if i % FLAGS.log_interval == 0:
                     for k, v in update_info.items():
                         wandb.log({f'training/{k}': v, 'global_steps': total_env_steps})
@@ -161,10 +159,7 @@ def main(_):
                     wandb.log({f'evaluation/{k}': v, 'global_steps': total_env_steps})
 
                 # Update the log with collected data
-                if FLAGS.finetune_steps == 0:
-                    eval_stats['cl_method'] = 'hat'
-                else:
-                    eval_stats['cl_method'] = algo
+                eval_stats['cl_method'] = algo
                 eval_stats['x'] = total_env_steps
                 eval_stats['steps_per_task'] = FLAGS.max_steps
                 log.update(eval_stats)

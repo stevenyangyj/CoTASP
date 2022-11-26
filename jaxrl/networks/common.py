@@ -111,6 +111,12 @@ def replace_embeds(pi_params: Params, codes: FrozenDict, components: FrozenDict,
     return freeze(actor_params)
 
 
+def reset_model(main_cls, model_cls, configs: dict, inputs: list):
+    model = model_cls(**configs)
+    _, new_params = model.init(*inputs).pop('params')
+    return main_cls.update_params(new_params)
+
+
 def reset_logstd_layer(key: PRNGKey, pi_params: Params, scale: float):
     params_actor = unfreeze(pi_params)
     kernel = params_actor['log_std_layer']['kernel']

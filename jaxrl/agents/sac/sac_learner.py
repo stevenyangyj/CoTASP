@@ -66,17 +66,14 @@ class SACLearner(object):
                  observations: jnp.ndarray,
                  actions: jnp.ndarray,
                  optim_configs: dict = {},
-                 hidden_dims: Sequence[int] = (256, 256),
-                 name_activation: str = 'leaky_relu',
-                 use_layer_norm: bool = True,
+                 actor_configs: dict = {},
+                 critic_configs: dict = {},
                  discount: float = 0.99,
                  tau: float = 0.005,
                  target_update_period: int = 1,
                  target_entropy: Optional[float] = None,
                  backup_entropy: bool = True,
-                 init_temperature: float = 1.0,
-                 init_mean: Optional[np.ndarray] = None,
-                 policy_final_fc_init_scale: float = 1.0):
+                 init_temperature: float = 1.0):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
         """
@@ -95,21 +92,13 @@ class SACLearner(object):
 
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
-        actor_def = policies.NormalTanhPolicy(
-            hidden_dims,
-            action_dim,
-            name_activation=name_activation,
-            use_layer_norm=use_layer_norm,
-            init_mean=init_mean,
-            final_fc_init_scale=policy_final_fc_init_scale)
+        actor_configs['action_dim'] = action_dim
+        actor_def = policies.NormalTanhPolicy(**actor_configs)
         actor = Model.create(actor_def,
                              inputs=[actor_key, observations],
                              tx=set_optimizer(**optim_configs))
 
-        critic_def = critic_net.DoubleCritic(
-            hidden_dims=hidden_dims,
-            name_activation='leaky_relu',
-            use_layer_norm=use_layer_norm)
+        critic_def = critic_net.DoubleCritic(**critic_configs)
         critic = Model.create(critic_def,
                               inputs=[critic_key, observations, actions],
                               tx=set_optimizer(**optim_configs))
@@ -129,11 +118,9 @@ class SACLearner(object):
         # for reset models
         self.dummy_a = actions
         self.dummy_o = observations
-        self.hidden_dims = hidden_dims
-        self.name_activation = name_activation
-        self.use_layer_norm = use_layer_norm
+        self.actor_cfgs = actor_configs
+        self.critic_cfgs = critic_configs
         self.init_temp = init_temperature
-        self.final_fc_init_scale = policy_final_fc_init_scale
 
         self.step = 0
 
@@ -190,7 +177,7 @@ def _sample_actions(
 
 @functools.partial(jax.jit, static_argnames=('backup_entropy', 'finetune', 'first_task'))
 def _update_spc_jit(
-    rng: PRNGKey, task_id: int, pms_mask: FrozenDict, alpha: float, actor: AlterTrainableModel, 
+    rng: PRNGKey, task_id: int, pms_mask: FrozenDict, actor: AlterTrainableModel, 
     critic: Model, target_critic: Model, temp: Model, batch: Batch, discount: float, tau: float,
     target_entropy: float, backup_entropy: bool, finetune: bool, first_task: bool
 ) -> Tuple[PRNGKey, AlterTrainableModel, Model, Model, Model, InfoDict]:
@@ -198,7 +185,6 @@ def _update_spc_jit(
     rng, key = jax.random.split(rng)
     def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         dist, dicts = actor.apply_fn({'params': actor_params}, batch.observations, jnp.array([task_id]))
-        # masks = dicts['masks']
         actions = dist.sample(seed=key)
         log_probs = dist.log_prob(actions)
         q1, q2 = critic(batch.observations, actions)
@@ -223,23 +209,23 @@ def _update_spc_jit(
             'hac_sac_loss': actor_loss,
             'entropy': -log_probs.mean(),
             'reg_sparsity': reg,
-            'means': dicts['means'].mean()}
+            'means': dicts['means'].mean(),
+            'l1_mean_gates': utils_fn.tree_l1_mean(dicts['masks'])}
     
-    if finetune:
-        grads_actor, actor_info = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
-        # grads norm
-        actor_info['g_norm_actor'] = global_norm(grads_actor)
+    # grads of actor
+    grads_actor, actor_info = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
+    # grads norm
+    actor_info['g_norm_actor'] = global_norm(grads_actor)
 
+    if finetune:
+        # only update gates \alpha
         new_actor = actor.apply_gradient_one(grads=grads_actor, has_aux=False)
-        
         if not first_task:
             actor_info['used_capacity'] = 1.0 - tree_l1_mean(pms_mask)
         else:
             actor_info['used_capacity'] = 0.0
     else:
-        grads_actor, actor_info = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
-        # grads norm
-        actor_info['g_norm_actor'] = global_norm(grads_actor)
+        # only update actor params
         # Restrict layer gradients in backprop
         grads_actor = unfreeze(grads_actor)
         if not first_task:
@@ -249,27 +235,20 @@ def _update_spc_jit(
             actor_info['used_capacity'] = 1.0 - tree_l1_mean(pms_mask)
         else:
             actor_info['used_capacity'] = 0.0
-
         new_actor = actor.apply_gradient_two(grads=freeze(grads_actor), has_aux=False)
-
-    # monitoring embeddings
-    # in_embeds = {}
-    # for k in comp_emb.keys():
-    #     in_embeds[k] = new_actor.params[k]['embedding'][task_id]
-    # actor_info['l1_mean_embeds'] = tree_l1_mean(in_embeds)
 
     def temperature_loss_fn(temp_params: Params):
         temperature = temp.apply_fn({'params': temp_params})
         temp_loss = temperature * (actor_info['entropy'] - target_entropy).mean()
         return temp_loss, {'temperature': temperature, 'temp_loss': temp_loss}
     
-    if finetune:
-        new_temp = temp
-        alpha_info = {'temperature': temp(), 'temp_loss': -69, 'g_norm_temp': -69}
-    else:
-        grads_temp, alpha_info = jax.grad(temperature_loss_fn, has_aux=True)(temp.params)
-        alpha_info['g_norm_temp'] = global_norm(grads_temp)  
-        new_temp = temp.apply_gradient(grads=grads_temp, has_aux=False)
+    # if finetune:
+    #     new_temp = temp
+    #     alpha_info = {'temperature': temp(), 'temp_loss': -69, 'g_norm_temp': -69}
+    # else:
+    grads_temp, alpha_info = jax.grad(temperature_loss_fn, has_aux=True)(temp.params)
+    alpha_info['g_norm_temp'] = global_norm(grads_temp)  
+    new_temp = temp.apply_gradient(grads=grads_temp, has_aux=False)
     
     rng, key = jax.random.split(rng)
     dist, _ = actor(batch.next_observations, jnp.array([task_id]))
@@ -308,44 +287,29 @@ class SPCLearner(SACLearner):
         seed: int,
         observations: jnp.ndarray,
         actions: jnp.ndarray,
-        task_nums: int,
+        task_n: int,
         max_steps: int = 1000,
-        start_training: int = 10000,
         finetune_steps: int = 10000,
-        thres_emb: float = 6.0,
-        alpha: float = 0.01,
-        s_warm_start: bool = False,
-        s_start: float = 400.0,
-        s_end: float = 1/400.0,
         sparsity_coeff: float = 1e-3,
         optim_configs: dict = {},
-        hidden_dims: Sequence[int] = (256, 256),
-        name_activation: str = 'leaky_relu',
-        use_layer_norm: bool = False,
-        use_rms_norm: bool = True,
-        discount: float = 0.99,
+        actor_configs: dict = {},
+        critic_configs: dict = {},
         tau: float = 0.005,
+        discount: float = 0.99,
         target_update_period: int = 1,
         target_entropy: Optional[float] = None,
         backup_entropy: bool = True,
-        init_temperature: float = 1.0,
-        init_mean: Optional[jnp.ndarray] = None,
-        policy_final_fc_init_scale: float = 1e-3):
+        init_temperature: float = 1.0):
         super(SPCLearner, self).__init__(seed, observations, actions, optim_configs,
-              hidden_dims, name_activation, use_layer_norm, discount, tau, target_update_period,
-              target_entropy, backup_entropy, init_temperature, init_mean, policy_final_fc_init_scale)
+              actor_configs, critic_configs, discount, tau, target_update_period,
+              target_entropy, backup_entropy, init_temperature)
 
         action_dim = actions.shape[-1]
 
         self.rng, actor_key = jax.random.split(self.rng, 2)
-        actor_def = policies.HatTanhPolicy(
-            hidden_dims=hidden_dims,
-            action_dim=action_dim,
-            task_num=task_nums,
-            name_activation=name_activation,
-            use_layer_norm=use_layer_norm,
-            use_rms_norm=use_rms_norm,
-            final_fc_init_scale=policy_final_fc_init_scale)
+        actor_configs['task_num'] = task_n
+        actor_configs['action_dim'] = action_dim
+        actor_def = policies.HatTanhPolicy(**actor_configs)
         actor = AlterTrainableModel.create(
             model_def=actor_def,
             inputs=[actor_key, observations, jnp.array([0])],
@@ -363,7 +327,7 @@ class SPCLearner(SACLearner):
 
         # preset dict learner for each layer:
         self.dict4layers = {}
-        for id_layer, hidn in enumerate(hidden_dims):
+        for id_layer, hidn in enumerate(actor_configs['hidden_dims']):
             dict_learner = OnlineDictLearnerV2(
                 n_features=384,
                 n_components=hidn,
@@ -374,37 +338,20 @@ class SPCLearner(SACLearner):
                 verbose=True)
             self.dict4layers[f'embeds_bb_{id_layer}'] = dict_learner
 
-        self.s = s_start
         self.actor = actor
-        self.alpha = alpha          # Grid search = [0.1, 0.25, 0.5, 0.75, 1, 1.5, 2.5, 4]; chosen was 0.75
-        self.s_end = s_end          # Grid search = [25, 50, 100, 200, 400, 800]; chosen was 400
         self.mask_cum = None
         self.mask_prm = None
         self.finetune = True
         self.fir_task = True
-        self.s_start = s_start
-        self.thres_emb = thres_emb
         self.max_steps = max_steps
-        self.s_warm_start = s_warm_start
         self.finetune_steps = finetune_steps
-        self.start_training = start_training
         self.get_grad_masks = get_grad_masks_jit
+        self.task_embeddings = []
         self.task_encoder = SentenceTransformer('all-MiniLM-L12-v2')
-        
-        # if self.s_warm_start:
-        #     self.s_scdr = utils_fn.linear_warm_start(
-        #         start_val=self.s_start,
-        #         end_val=self.s_end,
-        #         warm_steps=self.finetune_steps,
-        #         linear_steps=self.max_steps-self.start_training-self.finetune_steps)
-        # else:
-        #     self.s_scdr = utils_fn.linear_ascent(
-        #         start_val=self.s_start,
-        #         end_val=self.s_end,
-        #         linear_steps=self.max_steps-self.start_training)
 
     def start_task(self, task_id: int, description: str):
         task_e = self.task_encoder.encode(description)
+        self.task_embeddings.append(task_e)
 
         # set init gates for each layer of actor
         actor_params = unfreeze(self.actor.params)
@@ -420,12 +367,6 @@ class SPCLearner(SACLearner):
                        observations: np.ndarray,
                        task_id: int,
                        temperature: float = 1.0) -> jnp.ndarray:
-        # if temperature == 0:
-        #     # evaluation mode
-        #     s_t = self.s_end
-        # else:
-        #     # exploration mode
-        #     s_t = self.s
 
         rng, actions, _ = _sample_actions(self.rng, self.actor.apply_fn,
                                           self.actor.params, observations, 
@@ -434,45 +375,39 @@ class SPCLearner(SACLearner):
         return actions
 
     def update(self, task_id: int, batch: Batch) -> InfoDict:
-        if self.step >= self.finetune_steps:
+        if self.step == self.finetune_steps:
+            # turn into the actor params learning
             self.finetune = False
-
-        self.step += 1
-        # self.s = self.s_scdr(self.step)
+            # reset temperature and its optimizer
+            self.rng, key_temp = jax.random.split(self.rng)
+            self.temp = utils_fn.reset_model(
+                self.temp,
+                temperature.Temperature,
+                {'init_temp': self.init_temp},
+                [key_temp])
+            self.temp = self.temp.reset_optimizer()
 
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_spc_jit(
             rng=self.rng, task_id=task_id, pms_mask=self.mask_prm,
-            alpha=self.alpha, actor=self.actor, critic=self.critic, target_critic=self.target_critic, 
+            actor=self.actor, critic=self.critic, target_critic=self.target_critic, 
             temp=self.temp, batch=batch, discount=self.discount, tau=self.tau, target_entropy=self.target_entropy, 
             backup_entropy=self.backup_entropy, finetune=self.finetune, first_task=self.fir_task)
 
+        self.step += 1
         self.rng = new_rng
         self.actor = new_actor
         self.critic = new_critic
         self.target_critic = new_target_critic
         self.temp = new_temp     
 
-        # info['scale_factor'] = self.s
         return info
 
     def end_task(self, task_id: int):
-        # reset scaling parameter schedule for next task
         self.step = 0
-        if self.s_warm_start:
-            self.s_scdr = utils_fn.linear_warm_start(
-                start_val=self.s_start,
-                end_val=self.s_end,
-                warm_steps=self.finetune_steps,
-                linear_steps=self.max_steps-self.start_training-self.finetune_steps)
-        else:
-            self.s_scdr = utils_fn.linear_ascent(
-                start_val=self.s_start,
-                end_val=self.s_end,
-                linear_steps=self.max_steps-self.start_training)
 
         self.rng, _, dicts = _sample_actions(self.rng, self.actor.apply_fn,
                                              self.actor.params, self.dummy_o, 
-                                             jnp.array([task_id]), self.s_end)
+                                             jnp.array([task_id]))
         mask_now = dicts['masks']
         # cumulative attention from all the previous tasks
         if self.fir_task:
@@ -490,53 +425,43 @@ class SPCLearner(SACLearner):
         grad_masks = self.get_grad_masks(
             {'params': self.actor.params}, self.mask_cum)
         grad_masks = jax.tree_util.tree_map(
-            lambda x: jnp.where(x < 1.0, 0.0, 1.0), grad_masks)
+            lambda x: jnp.where(x < 1.0, 0, 1.0), grad_masks)
         self.mask_prm = freeze(grad_masks)
 
-        # reset params for coder, critic ,target_critic and temperature
-        self.rng, key_critic, key_temp, key_actor, key_coder = jax.random.split(self.rng, 5)
-        coder_def = policies.Coder(
-            hidden_lens=len(self.hidden_dims),
-            compnt_nums=self.component_nums)
-        critic_def = critic_net.DoubleCritic(
-            hidden_dims=self.hidden_dims,
-            name_activation='leaky_relu',
-            use_layer_norm=self.use_layer_norm)
-        temp_def = temperature.Temperature(self.init_temp)
+        # reset params for critic ,target_critic and temperature
+        self.rng, key_critic, key_temp, key_actor = jax.random.split(self.rng, 4)
 
-        _, new_params_coder = coder_def.init(key_coder).pop('params')
-        _, new_params_critic = critic_def.init(
-            key_critic, self.dummy_o, self.dummy_a).pop('params')
-        _, new_params_temp = temp_def.init(key_temp).pop('params')
+        self.critic = utils_fn.reset_model(
+            self.critic, 
+            critic_net.DoubleCritic,
+            self.critic_cfgs,
+            [key_critic, self.dummy_o, self.dummy_a])
 
-        self.coder = self.coder.update_params(new_params_coder)
-        self.critic = self.critic.update_params(new_params_critic)
-        self.target_critic = self.target_critic.update_params(new_params_critic)
-        self.temp = self.temp.update_params(new_params_temp)
+        self.target_critic = self.target_critic.update_params(self.critic.params)
+
+        self.temp = utils_fn.reset_model(
+            self.temp,
+            temperature.Temperature,
+            {'init_temp': self.init_temp},
+            [key_temp])
 
         # reset log_std_layer params
         new_params_actor = utils_fn.reset_logstd_layer(
             key_actor,
             self.actor.params,
-            self.final_fc_init_scale)
+            self.actor_cfgs['final_fc_init_scale'])
         self.actor.update_params(new_params_actor)
 
         # update dictionary learners
-        params_actor = self.actor.params
-        comp_embs = self.dict_component['cbl']
-        dict_embs = self.dict_component['lbl']
-        for k in comp_embs.keys():
-            embeds = params_actor[k]['embedding'][task_id]
-            embeds = np.array([embeds])
-            dict_learner = dict_embs[k]['learner']
-            dict_learner.decompose(embeds)
-            dict_embs[k] = {'learner': dict_learner}
-            comp_embs[k] = {'components': jnp.asarray(dict_learner.get_components())}
-        self.dict_component['lbl'] = dict_embs
-        self.dict_component['cbl'] = comp_embs
+        for k in self.actor.params.keys():
+            if k.startswith('embeds'):
+                optimal_gates = self.actor.params[k]['embedding'][task_id]
+                optimal_gates = np.array([optimal_gates.flatten()])
+                task_e = self.task_embeddings[task_id][np.newaxis]
+                # online update dictionary via CD
+                self.dict4layers[k].update_dict(optimal_gates, task_e)
 
         # reset optimizers
-        self.coder = self.coder.reset_optimizer()
         self.actor = self.actor.reset_optimizer()
         self.critic = self.critic.reset_optimizer()
         self.temp = self.temp.reset_optimizer()

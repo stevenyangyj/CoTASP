@@ -4,16 +4,7 @@ import ml_collections
 def get_config():
     config = ml_collections.ConfigDict()
 
-    # config.coder_lr = 1e-3
-    # config.actor_lr = 1e-3
-    # config.critic_lr = 1e-3
-    # config.temp_lr = 1e-3
-
-    # config.global_norm = False
-    # config.coder_norm = 1.0
-    # config.actor_norm = 1.0
-    # config.critic_norm = 1.0
-    # config.temp_norm = 1.0
+    config.sparsity_coeff = 1e-3
 
     config.optim_configs = ml_collections.ConfigDict()
     config.optim_configs.lr = 3e-4
@@ -22,18 +13,18 @@ def get_config():
     config.optim_configs.clip_method = 'global_clip'
     config.optim_configs.decay_coef = 1e-5
 
-    config.hidden_dims = (1024, 1024, 1024, 1024)
-    config.name_activation = 'leaky_relu'
-    config.use_layer_norm = False
-    config.use_rms_norm = False
+    config.actor_configs = ml_collections.ConfigDict()
+    config.actor_configs.hidden_dims = (1024, 1024, 1024, 1024)
+    config.actor_configs.name_activation = 'leaky_relu'
+    config.actor_configs.use_rms_norm = False
+    config.actor_configs.use_layer_norm = False
+    config.actor_configs.final_fc_init_scale = 1e-3
 
-    config.s_warm_start = False
-    config.s_start = 1/400.0
-    config.s_end = 400.0
+    config.critic_configs = ml_collections.ConfigDict()
+    config.critic_configs.hidden_dims = (1024, 1024, 1024, 1024)
+    config.critic_configs.name_activation = 'leaky_relu'
+    config.critic_configs.use_layer_norm = False
 
-    config.sparsity_coeff = 1e-3
-
-    config.alpha = 0.75 # 0.02 (hat); 0.75 (spc)
     config.init_temperature = 1.0
     config.backup_entropy = True
 
