@@ -24,7 +24,7 @@ from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'cw10', 'Environment name.')
+flags.DEFINE_string('env_name', 'cw20', 'Environment name.')
 flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/SPC/logs', 'Logging dir.')
 flags.DEFINE_integer('seed', 8, 'Random seed.')
 flags.DEFINE_string('base_algo', 'spc', 'base learning algorithm')
@@ -36,7 +36,7 @@ flags.DEFINE_integer('batch_size', 128, 'Mini batch size.')
 flags.DEFINE_integer('updates_per_step', 1, 'Gradient updates per step.')
 flags.DEFINE_integer('max_steps', int(1e6), 'Number of training steps for each task')
 flags.DEFINE_integer('start_training', int(1e4), 'Number of training steps to start training.')
-flags.DEFINE_integer('finetune_steps', int(5e4), 'Number of finetune steps for the next task.')
+flags.DEFINE_integer('finetune_steps', int(1e5), 'Number of finetune steps for the next task.')
 
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 
@@ -88,7 +88,6 @@ def main(_):
             temp_env.observation_space.sample()[np.newaxis],
             temp_env.action_space.sample()[np.newaxis], 
             len(TASK_SEQS[FLAGS.env_name]),
-            FLAGS.max_steps,
             FLAGS.finetune_steps,
             **kwargs)
         del temp_env

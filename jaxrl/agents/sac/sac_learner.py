@@ -177,43 +177,35 @@ def _sample_actions(
 
 @functools.partial(jax.jit, static_argnames=('backup_entropy', 'finetune', 'first_task'))
 def _update_spc_jit(
-    rng: PRNGKey, task_id: int, pms_mask: FrozenDict, actor: AlterTrainableModel, 
-    critic: Model, target_critic: Model, temp: Model, batch: Batch, discount: float, tau: float,
-    target_entropy: float, backup_entropy: bool, finetune: bool, first_task: bool
-) -> Tuple[PRNGKey, AlterTrainableModel, Model, Model, Model, InfoDict]:
+    rng: PRNGKey, task_id: int, pms_mask: FrozenDict, actor: AlterTrainableModel, damping: float,
+    critic: Model, target_critic: Model, temp: Model, batch: Batch, discount: float, 
+    tau: float,target_entropy: float, backup_entropy: bool, finetune: bool, first_task: bool
+    ) -> Tuple[PRNGKey, AlterTrainableModel, Model, Model, Model, InfoDict]:
 
     rng, key = jax.random.split(rng)
-    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
+    def actor_loss_fn(actor_params: Params, temp_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         dist, dicts = actor.apply_fn({'params': actor_params}, batch.observations, jnp.array([task_id]))
         actions = dist.sample(seed=key)
         log_probs = dist.log_prob(actions)
         q1, q2 = critic(batch.observations, actions)
         q = jnp.minimum(q1, q2)
-        actor_loss = (log_probs * temp() - q).mean()
-        # masking regularization
-        reg = 0
-        # count = 0
-        # if first_task:
-        #     for m_k in masks.keys():
-        #         reg += masks[m_k]['embedding'].sum()
-        #         count += masks[m_k]['embedding'].size
-        # else:
-        #     for m_k, pm_k in zip(masks.keys(), cum_mask.keys()):
-        #         aux = 1 - cum_mask[pm_k]['embedding']
-        #         reg += (masks[m_k]['embedding'] * aux).sum()
-        #         count += aux.sum()
-        # reg /= count
-        # actor_loss += alpha * reg
+        # actor_loss = (log_probs * temp() - q).mean()
+
+        # Modified Differential Method of Multipliers
+        epi = -target_entropy
+        damp = damping * jax.lax.stop_gradient(epi - log_probs.mean())
+        temperature = temp.apply_fn({'params': temp_params})
+        actor_loss = -q.mean() - (temperature - damp) * (epi - log_probs.mean())
 
         return actor_loss, {
             'hac_sac_loss': actor_loss,
             'entropy': -log_probs.mean(),
-            'reg_sparsity': reg,
             'means': dicts['means'].mean(),
             'l1_mean_gates': utils_fn.tree_l1_mean(dicts['masks'])}
     
     # grads of actor
-    grads_actor, actor_info = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
+    (grads_actor, grads_temp), actor_info = jax.grad(
+        actor_loss_fn, (0, 1) ,has_aux=True)(actor.params, temp.params)
     # grads norm
     actor_info['g_norm_actor'] = global_norm(grads_actor)
 
@@ -237,18 +229,20 @@ def _update_spc_jit(
             actor_info['used_capacity'] = 0.0
         new_actor = actor.apply_gradient_two(grads=freeze(grads_actor), has_aux=False)
 
-    def temperature_loss_fn(temp_params: Params):
-        temperature = temp.apply_fn({'params': temp_params})
-        temp_loss = temperature * (actor_info['entropy'] - target_entropy).mean()
-        return temp_loss, {'temperature': temperature, 'temp_loss': temp_loss}
+    # def temperature_loss_fn(temp_params: Params):
+    #     temperature = temp.apply_fn({'params': temp_params})
+    #     temp_loss = temperature * (actor_info['entropy'] - target_entropy).mean()
+    #     return temp_loss, {'temperature': temperature, 'temp_loss': temp_loss}
     
     # if finetune:
     #     new_temp = temp
     #     alpha_info = {'temperature': temp(), 'temp_loss': -69, 'g_norm_temp': -69}
     # else:
-    grads_temp, alpha_info = jax.grad(temperature_loss_fn, has_aux=True)(temp.params)
-    alpha_info['g_norm_temp'] = global_norm(grads_temp)  
-    new_temp = temp.apply_gradient(grads=grads_temp, has_aux=False)
+    # grads_temp, alpha_info = jax.grad(temperature_loss_fn, has_aux=True)(temp.params)
+    alpha_info = {'temperature': temp(), 'temp_loss': -69}
+    alpha_info['g_norm_temp'] = global_norm(grads_temp)
+    neg_grads_temp = jax.tree_util.tree_map(lambda x: -x, grads_temp)
+    new_temp = temp.apply_gradient(grads=neg_grads_temp, has_aux=False)
     
     rng, key = jax.random.split(rng)
     dist, _ = actor(batch.next_observations, jnp.array([task_id]))
@@ -288,12 +282,12 @@ class SPCLearner(SACLearner):
         observations: jnp.ndarray,
         actions: jnp.ndarray,
         task_n: int,
-        max_steps: int = 1000,
         finetune_steps: int = 10000,
         sparsity_coeff: float = 1e-3,
         optim_configs: dict = {},
         actor_configs: dict = {},
         critic_configs: dict = {},
+        damping: float = 5.0,
         tau: float = 0.005,
         discount: float = 0.99,
         target_update_period: int = 1,
@@ -339,11 +333,11 @@ class SPCLearner(SACLearner):
             self.dict4layers[f'embeds_bb_{id_layer}'] = dict_learner
 
         self.actor = actor
+        self.damping = damping
         self.mask_cum = None
         self.mask_prm = None
         self.finetune = True
         self.fir_task = True
-        self.max_steps = max_steps
         self.finetune_steps = finetune_steps
         self.get_grad_masks = get_grad_masks_jit
         self.task_embeddings = []
@@ -379,17 +373,17 @@ class SPCLearner(SACLearner):
             # turn into the actor params learning
             self.finetune = False
             # reset temperature and its optimizer
-            self.rng, key_temp = jax.random.split(self.rng)
-            self.temp = utils_fn.reset_model(
-                self.temp,
-                temperature.Temperature,
-                {'init_temp': self.init_temp},
-                [key_temp])
-            self.temp = self.temp.reset_optimizer()
+            # self.rng, key_temp = jax.random.split(self.rng)
+            # self.temp = utils_fn.reset_model(
+            #     self.temp,
+            #     temperature.Temperature,
+            #     {'init_temp': self.init_temp},
+            #     [key_temp])
+            # self.temp = self.temp.reset_optimizer()
 
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_spc_jit(
             rng=self.rng, task_id=task_id, pms_mask=self.mask_prm,
-            actor=self.actor, critic=self.critic, target_critic=self.target_critic, 
+            actor=self.actor, damping=self.damping, critic=self.critic, target_critic=self.target_critic, 
             temp=self.temp, batch=batch, discount=self.discount, tau=self.tau, target_entropy=self.target_entropy, 
             backup_entropy=self.backup_entropy, finetune=self.finetune, first_task=self.fir_task)
 

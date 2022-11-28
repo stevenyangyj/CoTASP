@@ -135,12 +135,12 @@ def set_optimizer(
     max_norm: float, 
     optim_algo: str='adam', 
     clip_method: str='global_clip',
-    decay_coef: Optional[float]=None) -> optax.GradientTransformation:
+    decay_coeff: Optional[float]=None) -> optax.GradientTransformation:
 
     if optim_algo == 'adam':
         optimizer = optax.adam(learning_rate=lr)
     elif optim_algo == 'adamw':
-        optimizer = optax.adamw(learning_rate=lr, weight_decay=decay_coef)
+        optimizer = optax.adamw(learning_rate=lr, weight_decay=decay_coeff)
     elif optim_algo == 'sgd':
         optimizer = optax.sgd(learning_rate=lr)
     elif optim_algo == 'radam':
