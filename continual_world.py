@@ -7,6 +7,8 @@ from gym.wrappers import TimeLimit
 
 from jaxrl import wrappers
 
+from jaxrl.wrappers.normalization import NormalizeReward
+
 def get_mt50() -> metaworld.MT50:
     saved_random_state = np.random.get_state()
     np.random.seed(999)
@@ -99,8 +101,9 @@ def get_subtasks(name: str) -> List[metaworld.Task]:
 def get_single_env(
     name, seed, 
     randomization="random_init_all",
-    add_episode_monitor=True
-):
+    add_episode_monitor=True,
+    normalize_reward=False
+    ):
     if name == "HalfCheetah-v3" or name == "Ant-v3":
         env = gym.make(name)
         env.seed(seed)
@@ -113,6 +116,8 @@ def get_single_env(
         env.name = name
         env = TimeLimit(env, META_WORLD_TIME_HORIZON)
     env = gym.wrappers.ClipAction(env)
+    if normalize_reward:
+        env = NormalizeReward(env)
     if add_episode_monitor:
         env = wrappers.EpisodeMonitor(env)
     return env
@@ -121,18 +126,33 @@ def get_single_env(
 if __name__ == "__main__":
     import time
 
-    tasks_list = TASK_SEQS["cw1-push"]
-    s = time.time()
-    env = get_single_env(tasks_list[0], 1, "deterministic")
-    print(time.time() - s)
-    s = time.time()
-    env = get_single_env(tasks_list[0], 1, "deterministic")
-    print(time.time() - s)
+    def print_reward(env: gym.Env):
+        obs, done = env.reset(), False
+        i = 0
+        while not done:
+            i += 1
+            next_obs, rew, done, _ = env.step(env.action_space.sample())
+            print(i, rew)
 
-    o = env.reset()
-    _, _, _, _ = env.step(env.action_space.sample())
-    o_new = env.reset()
-    print(o)
-    print(o_new)
-    print(env.observation_space.shape)
-    print(env.action_space.shape)
+    tasks_list = TASK_SEQS["cw1-push"]
+    env = get_single_env(tasks_list[0], 1, "deterministic", normalize_reward=False)
+    env_normalized = get_single_env(tasks_list[0], 1, "deterministic", normalize_reward=True)
+
+    print_reward(env)
+    print_reward(env_normalized)
+
+    # tasks_list = TASK_SEQS["cw1-push"]
+    # s = time.time()
+    # env = get_single_env(tasks_list[0], 1, "deterministic")
+    # print(time.time() - s)
+    # s = time.time()
+    # env = get_single_env(tasks_list[0], 1, "deterministic")
+    # print(time.time() - s)
+
+    # o = env.reset()
+    # _, _, _, _ = env.step(env.action_space.sample())
+    # o_new = env.reset()
+    # print(o)
+    # print(o_new)
+    # print(env.observation_space.shape)
+    # print(env.action_space.shape)

@@ -16,7 +16,7 @@ def default_init(scale: Optional[float] = jnp.sqrt(2)):
 
 def activation_fn(name: str = 'lrelu'):
     assert name in ['relu', 'tanh', 'leaky_relu', 'swish', 'elu',
-                    'gelu', 'selu']
+                    'gelu', 'selu', 'hard_tanh']
     if name == 'relu':
         act_fn = nn.relu
     elif name == 'tanh':
@@ -31,6 +31,8 @@ def activation_fn(name: str = 'lrelu'):
         act_fn = jax.nn.gelu
     elif name == 'selu':
         act_fn = jax.nn.selu
+    elif name == 'hard_tanh':
+        act_fn = jax.nn.hard_tanh
     return act_fn
 
 
@@ -103,6 +105,18 @@ def tree_l1_mean(updates: Params) -> jnp.array:
     return sums / count
 
 
+def rate_activity(updates: Params) -> jnp.array:
+    sums = 0
+    count = 0
+    updates = jax.tree_util.tree_map(
+        lambda x: jnp.where(x < 0.5, 0, 1.0), updates)
+    for x in jax.tree_util.tree_leaves(updates):
+        count += x.size
+        sums += x.sum()
+    
+    return sums / count
+
+
 def replace_embeds(pi_params: Params, codes: FrozenDict, components: FrozenDict, index: int) -> Params:
     actor_params = unfreeze(pi_params)
     for k in components.keys():
@@ -147,6 +161,8 @@ def set_optimizer(
         optimizer = optax.radam(learning_rate=lr)
     elif optim_algo == 'adabelief':
         optimizer = optax.adabelief(learning_rate=lr)
+    elif optim_algo == 'amsgrad':
+        optimizer = optax.amsgrad(learning_rate=lr)
     else:
         raise NotImplementedError
 
@@ -598,3 +614,9 @@ class ModelActor:
         with open(load_path, 'rb') as f:
             params = flax.serialization.from_bytes(self.params, f.read())
         return self.replace(params=params)
+
+
+if __name__ == "__main__":
+
+    a = {'1': jnp.array([0.1, 0.2, 0.8, 0.9, 1.0, 0.0, 0.5, 0.49])}
+    print(jax.jit(rate_activity)(a))

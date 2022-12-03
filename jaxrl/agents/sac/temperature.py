@@ -11,13 +11,13 @@ MIN_TEMP = 1e-4
 
 
 class Temperature(nn.Module):
-    init_temp: float = 1.0
+    init_log_temp: float = 1.0
 
     @nn.compact
     def __call__(self) -> jnp.ndarray:
         log_temp = self.param('log_temp',
                               init_fn=lambda key: jnp.full(
-                                  (), jnp.log(self.init_temp)))
+                                  (), self.init_log_temp))
         return jnp.exp(log_temp)
 
 

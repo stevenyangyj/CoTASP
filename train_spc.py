@@ -24,11 +24,12 @@ from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'cw20', 'Environment name.')
+flags.DEFINE_string('env_name', 'cw3-test', 'Environment name.')
 flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/SPC/logs', 'Logging dir.')
 flags.DEFINE_integer('seed', 8, 'Random seed.')
 flags.DEFINE_string('base_algo', 'spc', 'base learning algorithm')
 
+flags.DEFINE_boolean('normalize_reward', False, 'Normalize rewards')
 flags.DEFINE_integer('eval_episodes', 1, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
@@ -36,7 +37,7 @@ flags.DEFINE_integer('batch_size', 128, 'Mini batch size.')
 flags.DEFINE_integer('updates_per_step', 1, 'Gradient updates per step.')
 flags.DEFINE_integer('max_steps', int(1e6), 'Number of training steps for each task')
 flags.DEFINE_integer('start_training', int(1e4), 'Number of training steps to start training.')
-flags.DEFINE_integer('finetune_steps', int(1e5), 'Number of finetune steps for the next task.')
+flags.DEFINE_integer('finetune_steps', int(5e4), 'Number of finetune steps for the next task.')
 
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 
@@ -55,7 +56,7 @@ def main(_):
     # config tasks
     seq_tasks = TASK_SEQS[FLAGS.env_name]
 
-    kwargs = dict(FLAGS.config)
+    algo_kwargs = dict(FLAGS.config)
     algo = FLAGS.base_algo
     run_name = f"{FLAGS.env_name}__{algo}__{FLAGS.seed}__{int(time.time())}"
 
@@ -88,8 +89,9 @@ def main(_):
             temp_env.observation_space.sample()[np.newaxis],
             temp_env.action_space.sample()[np.newaxis], 
             len(TASK_SEQS[FLAGS.env_name]),
+            FLAGS.max_steps,
             FLAGS.finetune_steps,
-            **kwargs)
+            **algo_kwargs)
         del temp_env
     else:
         raise NotImplementedError()
@@ -110,7 +112,9 @@ def main(_):
         agent.start_task(task_idx, dict_t["hint"])
 
         # set continual world environment
-        env = get_single_env(dict_t['task'], FLAGS.seed, randomization='deterministic')
+        env = get_single_env(
+            dict_t['task'], FLAGS.seed, randomization='deterministic', 
+            normalize_reward=FLAGS.normalize_reward)
 
         # reset replay buffer
         replay_buffer = ReplayBuffer(env.observation_space, env.action_space,
@@ -120,7 +124,7 @@ def main(_):
         for i in tqdm.tqdm(range(1, FLAGS.max_steps + 1),
                            smoothing=0.1,
                            disable=not FLAGS.tqdm):
-            if i < FLAGS.start_training and task_idx == 0:
+            if i < FLAGS.start_training:
                 action = env.action_space.sample()
             else:
                 action = agent.sample_actions(observation[np.newaxis], task_idx)

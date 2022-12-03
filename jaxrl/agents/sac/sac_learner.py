@@ -22,8 +22,7 @@ from jaxrl.agents.sac.critic import update as update_critic
 from jaxrl.datasets import Batch
 from jaxrl.networks import critic_net, policies
 from jaxrl.networks.common import InfoDict, Model, PRNGKey, Params, \
-    AlterTrainableModel, global_norm, set_optimizer, default_init, \
-    tree_l1_mean, replace_embeds
+    AlterTrainableModel, global_norm, set_optimizer, tree_l1_mean
 from jaxrl.dict_learning.task_dict import OnlineDictLearnerV2
 
 
@@ -72,7 +71,6 @@ class SACLearner(object):
                  tau: float = 0.005,
                  target_update_period: int = 1,
                  target_entropy: Optional[float] = None,
-                 backup_entropy: bool = True,
                  init_temperature: float = 1.0):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -81,11 +79,10 @@ class SACLearner(object):
         action_dim = actions.shape[-1]
 
         if target_entropy is None:
-            self.target_entropy = -action_dim / 2
+            self.target_entropy = -1.0 * action_dim
         else:
             self.target_entropy = target_entropy
 
-        self.backup_entropy = backup_entropy
         self.tau = tau
         self.target_update_period = target_update_period
         self.discount = discount
@@ -105,9 +102,11 @@ class SACLearner(object):
         target_critic = Model.create(
             critic_def, inputs=[critic_key, observations, actions])
 
+        # temperature needs smaller grad_clip value
+        optim_configs['max_norm'] = 0.01
         temp = Model.create(temperature.Temperature(init_temperature),
                             inputs=[temp_key],
-                            tx=set_optimizer(3e-4, 0.01, 'adam', 'global_clip'))
+                            tx=set_optimizer(**optim_configs))
 
         self.actor = actor
         self.critic = critic
@@ -141,7 +140,7 @@ class SACLearner(object):
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_jit(
             self.rng, self.actor, self.critic, self.target_critic, self.temp,
             batch, self.discount, self.tau, self.target_entropy,
-            self.backup_entropy, self.step % self.target_update_period == 0)
+            self.step % self.target_update_period == 0)
 
         self.rng = new_rng
         self.actor = new_actor
@@ -175,37 +174,40 @@ def _sample_actions(
     return rng, dist.sample(seed=key), dicts
 
 
-@functools.partial(jax.jit, static_argnames=('backup_entropy', 'finetune', 'first_task'))
+@functools.partial(jax.jit, static_argnames=('finetune', 'first_task'))
 def _update_spc_jit(
-    rng: PRNGKey, task_id: int, pms_mask: FrozenDict, actor: AlterTrainableModel, damping: float,
+    rng: PRNGKey, task_id: int, pms_mask: FrozenDict, actor: AlterTrainableModel,
     critic: Model, target_critic: Model, temp: Model, batch: Batch, discount: float, 
-    tau: float,target_entropy: float, backup_entropy: bool, finetune: bool, first_task: bool
+    tau: float, target_entropy: float, finetune: bool, first_task: bool
     ) -> Tuple[PRNGKey, AlterTrainableModel, Model, Model, Model, InfoDict]:
 
     rng, key = jax.random.split(rng)
-    def actor_loss_fn(actor_params: Params, temp_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
+    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         dist, dicts = actor.apply_fn({'params': actor_params}, batch.observations, jnp.array([task_id]))
         actions = dist.sample(seed=key)
         log_probs = dist.log_prob(actions)
         q1, q2 = critic(batch.observations, actions)
         q = jnp.minimum(q1, q2)
-        # actor_loss = (log_probs * temp() - q).mean()
+        actor_loss = (log_probs * temp() - q).mean()
 
         # Modified Differential Method of Multipliers
-        epi = -target_entropy
-        damp = damping * jax.lax.stop_gradient(epi - log_probs.mean())
-        temperature = temp.apply_fn({'params': temp_params})
-        actor_loss = -q.mean() - (temperature - damp) * (epi - log_probs.mean())
+        # epi = -target_entropy
+        # damp = damping * jax.lax.stop_gradient(epi - log_probs.mean())
+        # temperature = temp.apply_fn({'params': temp_params})
+        # actor_loss = -q.mean() - (temperature - damp) * (epi - log_probs.mean())
 
-        return actor_loss, {
+        _info = {
             'hac_sac_loss': actor_loss,
             'entropy': -log_probs.mean(),
-            'means': dicts['means'].mean(),
-            'l1_mean_gates': utils_fn.tree_l1_mean(dicts['masks'])}
+            'means': dicts['means'].mean()
+        }
+        for k in dicts['masks']:
+            _info[k+'_rate_act'] = utils_fn.rate_activity(dicts['masks'][k])
+
+        return actor_loss, _info
     
     # grads of actor
-    (grads_actor, grads_temp), actor_info = jax.grad(
-        actor_loss_fn, (0, 1) ,has_aux=True)(actor.params, temp.params)
+    grads_actor, actor_info = jax.grad(actor_loss_fn,has_aux=True)(actor.params)
     # grads norm
     actor_info['g_norm_actor'] = global_norm(grads_actor)
 
@@ -219,30 +221,25 @@ def _update_spc_jit(
     else:
         # only update actor params
         # Restrict layer gradients in backprop
-        grads_actor = unfreeze(grads_actor)
         if not first_task:
+            grads_actor = unfreeze(grads_actor)
             for k in pms_mask.keys():
                 for sub_k in pms_mask[k].keys():
                     grads_actor[k][sub_k] *= pms_mask[k][sub_k]
             actor_info['used_capacity'] = 1.0 - tree_l1_mean(pms_mask)
+            grads_actor = freeze(grads_actor)
         else:
             actor_info['used_capacity'] = 0.0
-        new_actor = actor.apply_gradient_two(grads=freeze(grads_actor), has_aux=False)
+        new_actor = actor.apply_gradient_two(grads=grads_actor, has_aux=False)
 
-    # def temperature_loss_fn(temp_params: Params):
-    #     temperature = temp.apply_fn({'params': temp_params})
-    #     temp_loss = temperature * (actor_info['entropy'] - target_entropy).mean()
-    #     return temp_loss, {'temperature': temperature, 'temp_loss': temp_loss}
+    def temperature_loss_fn(temp_params: Params):
+        temperature = temp.apply_fn({'params': temp_params})
+        temp_loss = temperature * (actor_info['entropy'] - target_entropy).mean()
+        return temp_loss, {'temperature': temperature, 'temp_loss': temp_loss}
     
-    # if finetune:
-    #     new_temp = temp
-    #     alpha_info = {'temperature': temp(), 'temp_loss': -69, 'g_norm_temp': -69}
-    # else:
-    # grads_temp, alpha_info = jax.grad(temperature_loss_fn, has_aux=True)(temp.params)
-    alpha_info = {'temperature': temp(), 'temp_loss': -69}
+    grads_temp, alpha_info = jax.grad(temperature_loss_fn, has_aux=True)(temp.params)
     alpha_info['g_norm_temp'] = global_norm(grads_temp)
-    neg_grads_temp = jax.tree_util.tree_map(lambda x: -x, grads_temp)
-    new_temp = temp.apply_gradient(grads=neg_grads_temp, has_aux=False)
+    new_temp = temp.apply_gradient(grads=grads_temp, has_aux=False)
     
     rng, key = jax.random.split(rng)
     dist, _ = actor(batch.next_observations, jnp.array([task_id]))
@@ -250,9 +247,8 @@ def _update_spc_jit(
     next_log_probs = dist.log_prob(next_actions)
     next_q1, next_q2 = target_critic(batch.next_observations, next_actions)
     next_q = jnp.minimum(next_q1, next_q2)
+    next_q -= temp() * next_log_probs
     target_q = batch.rewards + discount * batch.masks * next_q
-    if backup_entropy:
-        target_q -= discount * batch.masks * temp() * next_log_probs
 
     def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         q1, q2 = critic.apply_fn({'params': critic_params}, batch.observations,
@@ -282,21 +278,20 @@ class SPCLearner(SACLearner):
         observations: jnp.ndarray,
         actions: jnp.ndarray,
         task_n: int,
+        max_step: int = 1000000,
         finetune_steps: int = 10000,
-        sparsity_coeff: float = 1e-3,
+        dict_configs: dict = {},
         optim_configs: dict = {},
         actor_configs: dict = {},
         critic_configs: dict = {},
-        damping: float = 5.0,
         tau: float = 0.005,
         discount: float = 0.99,
         target_update_period: int = 1,
         target_entropy: Optional[float] = None,
-        backup_entropy: bool = True,
         init_temperature: float = 1.0):
         super(SPCLearner, self).__init__(seed, observations, actions, optim_configs,
               actor_configs, critic_configs, discount, tau, target_update_period,
-              target_entropy, backup_entropy, init_temperature)
+              target_entropy, init_temperature)
 
         action_dim = actions.shape[-1]
 
@@ -326,32 +321,32 @@ class SPCLearner(SACLearner):
                 n_features=384,
                 n_components=hidn,
                 seed=seed + id_layer + 1,
-                alpha=sparsity_coeff,
-                method='lasso_lars',
-                positive_code=False,
-                verbose=True)
+                positive_code=True,
+                verbose=True,
+                **dict_configs)
             self.dict4layers[f'embeds_bb_{id_layer}'] = dict_learner
 
         self.actor = actor
-        self.damping = damping
         self.mask_cum = None
         self.mask_prm = None
         self.finetune = True
         self.fir_task = True
+        self.max_step = max_step
+        self.actor_cfgs = actor_configs
         self.finetune_steps = finetune_steps
         self.get_grad_masks = get_grad_masks_jit
         self.task_embeddings = []
         self.task_encoder = SentenceTransformer('all-MiniLM-L12-v2')
 
     def start_task(self, task_id: int, description: str):
-        task_e = self.task_encoder.encode(description)
+        task_e = self.task_encoder.encode(description)[np.newaxis]
         self.task_embeddings.append(task_e)
 
         # set init gates for each layer of actor
         actor_params = unfreeze(self.actor.params)
         for k in actor_params.keys():
             if k.startswith('embeds'):
-                gates = self.dict4layers[k].get_gates(task_e[np.newaxis, :])
+                gates = self.dict4layers[k].get_gates(task_e)
                 gates = jnp.asarray(gates.flatten())
                 actor_params[k]['embedding'] = actor_params[k]['embedding'].at[task_id].set(gates.flatten())
         new_actor = self.actor.replace(params=freeze(actor_params))
@@ -370,22 +365,20 @@ class SPCLearner(SACLearner):
 
     def update(self, task_id: int, batch: Batch) -> InfoDict:
         if self.step == self.finetune_steps:
-            # turn into the actor params learning
             self.finetune = False
-            # reset temperature and its optimizer
-            # self.rng, key_temp = jax.random.split(self.rng)
-            # self.temp = utils_fn.reset_model(
-            #     self.temp,
-            #     temperature.Temperature,
-            #     {'init_temp': self.init_temp},
-            #     [key_temp])
-            # self.temp = self.temp.reset_optimizer()
+            self.rng, key_temp = jax.random.split(self.rng)
+            self.temp = utils_fn.reset_model(
+                self.temp,
+                temperature.Temperature,
+                {'init_log_temp': self.init_temp},
+                [key_temp])
+            self.temp = self.temp.reset_optimizer()
 
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_spc_jit(
             rng=self.rng, task_id=task_id, pms_mask=self.mask_prm,
-            actor=self.actor, damping=self.damping, critic=self.critic, target_critic=self.target_critic, 
+            actor=self.actor, critic=self.critic, target_critic=self.target_critic, 
             temp=self.temp, batch=batch, discount=self.discount, tau=self.tau, target_entropy=self.target_entropy, 
-            backup_entropy=self.backup_entropy, finetune=self.finetune, first_task=self.fir_task)
+            finetune=self.finetune, first_task=self.fir_task)
 
         self.step += 1
         self.rng = new_rng
@@ -398,6 +391,12 @@ class SPCLearner(SACLearner):
 
     def end_task(self, task_id: int):
         self.step = 0
+
+        # Post-fintuning /alpha
+        # self.finetune = True
+        # for i in range(self.finetune_steps):
+        #     batch = replay_buffer.sample(128)
+        #     _ = self.update(task_id, batch)
 
         self.rng, _, dicts = _sample_actions(self.rng, self.actor.apply_fn,
                                              self.actor.params, self.dummy_o, 
@@ -436,7 +435,7 @@ class SPCLearner(SACLearner):
         self.temp = utils_fn.reset_model(
             self.temp,
             temperature.Temperature,
-            {'init_temp': self.init_temp},
+            {'init_log_temp': self.init_temp},
             [key_temp])
 
         # reset log_std_layer params
@@ -451,7 +450,7 @@ class SPCLearner(SACLearner):
             if k.startswith('embeds'):
                 optimal_gates = self.actor.params[k]['embedding'][task_id]
                 optimal_gates = np.array([optimal_gates.flatten()])
-                task_e = self.task_embeddings[task_id][np.newaxis]
+                task_e = self.task_embeddings[task_id]
                 # online update dictionary via CD
                 self.dict4layers[k].update_dict(optimal_gates, task_e)
 
@@ -460,5 +459,5 @@ class SPCLearner(SACLearner):
         self.critic = self.critic.reset_optimizer()
         self.temp = self.temp.reset_optimizer()
 
-        self.finetune = True  # finetune again for the next task
-        self.fir_task = False # trigger for the next task
+        self.finetune = True   # close finetune for the next task
+        self.fir_task = False  # trigger for the next task

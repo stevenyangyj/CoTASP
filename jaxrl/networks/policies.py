@@ -19,7 +19,7 @@ from jaxrl.networks.common import MLP, Params, PRNGKey, \
 # from common import MLP, Params, PRNGKey, default_init, \
 #     activation_fn, RMSNorm, create_mask, zero_grads
 
-LOG_STD_MIN = -10.0
+LOG_STD_MIN = -20.0
 LOG_STD_MAX = 2.0
 
 
@@ -320,7 +320,7 @@ class HatTanhPolicy(nn.Module):
 
         self.backbones = [nn.Dense(hidn, kernel_init=default_init()) \
             for hidn in self.hidden_dims]
-        self.embeds_bb = [nn.Embed(self.task_num, hidn, embedding_init=jax.nn.initializers.zeros) \
+        self.embeds_bb = [nn.Embed(self.task_num, hidn, embedding_init=default_init()) \
             for hidn in self.hidden_dims]
         
         self.mean_layer = nn.Dense(
@@ -339,7 +339,7 @@ class HatTanhPolicy(nn.Module):
                 (self.action_dim,)
             )
 
-        self.ste = lambda x: jnp.minimum(jnp.maximum(x, 0), 1.)
+        self.relu1 = lambda x: jnp.minimum(jnp.maximum(x, 0), 1.)
         self.activation = activation_fn(self.name_activation)
         if self.use_layer_norm:
             self.normalizer = nn.LayerNorm(use_bias=False, use_scale=False)
@@ -356,7 +356,7 @@ class HatTanhPolicy(nn.Module):
         for i, layer in enumerate(self.backbones):
             x = layer(x)
             # straight-through estimator
-            g = self.ste(self.embeds_bb[i](t))
+            g = self.relu1(self.embeds_bb[i](t))
             masks[layer.name] = {'embedding': g}
             x = self.activation(x)
             x = x * jnp.broadcast_to(g, x.shape)
