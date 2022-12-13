@@ -44,9 +44,9 @@ TASK_SEQS = {
         {'task': "stick-pull-v1", 'hint': 'Grasp a stick and pull a box with the stick.'}
     ],
     "cw3-test": [
-        {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
         {'task': "stick-pull-v1", 'hint': 'Grasp a stick and pull a box with the stick.'},
-        {'task': "push-back-v1", 'hint': 'Pull a puck to a goal.'}
+        {'task': "push-back-v1", 'hint': 'Pull a puck to a goal.'},
+        {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
     ]
 }
 
@@ -73,6 +73,7 @@ class RandomizationWrapper(gym.Wrapper):
         env.set_task(subtasks[0])
         if kind == "random_init_all":
             env._freeze_rand_vec = False
+            env.seeded_rand_vec = True
 
         if kind == "random_init_fixed20":
             assert len(subtasks) >= 20
@@ -126,33 +127,31 @@ def get_single_env(
 if __name__ == "__main__":
     import time
 
-    def print_reward(env: gym.Env):
-        obs, done = env.reset(), False
-        i = 0
-        while not done:
-            i += 1
-            next_obs, rew, done, _ = env.step(env.action_space.sample())
-            print(i, rew)
-
-    tasks_list = TASK_SEQS["cw1-push"]
-    env = get_single_env(tasks_list[0], 1, "deterministic", normalize_reward=False)
-    env_normalized = get_single_env(tasks_list[0], 1, "deterministic", normalize_reward=True)
-
-    print_reward(env)
-    print_reward(env_normalized)
+    # def print_reward(env: gym.Env):
+    #     obs, done = env.reset(), False
+    #     i = 0
+    #     while not done:
+    #         i += 1
+    #         next_obs, rew, done, _ = env.step(env.action_space.sample())
+    #         print(i, rew)
 
     # tasks_list = TASK_SEQS["cw1-push"]
-    # s = time.time()
-    # env = get_single_env(tasks_list[0], 1, "deterministic")
-    # print(time.time() - s)
-    # s = time.time()
-    # env = get_single_env(tasks_list[0], 1, "deterministic")
-    # print(time.time() - s)
+    # env = get_single_env(tasks_list[0], 1, "deterministic", normalize_reward=False)
+    # env_normalized = get_single_env(tasks_list[0], 1, "deterministic", normalize_reward=True)
 
-    # o = env.reset()
-    # _, _, _, _ = env.step(env.action_space.sample())
-    # o_new = env.reset()
-    # print(o)
-    # print(o_new)
-    # print(env.observation_space.shape)
-    # print(env.action_space.shape)
+    # print_reward(env)
+    # print_reward(env_normalized)
+
+    tasks_list = TASK_SEQS["cw1-push"]
+    s = time.time()
+    env = get_single_env(tasks_list[0], 1, "random_init_all")
+    print(time.time() - s)
+    s = time.time()
+    env = get_single_env(tasks_list[0], 1, "random_init_all")
+    print(time.time() - s)
+
+    o = env.reset()
+    _, _, _, _ = env.step(np.array([np.nan, 1.0, -1.0, 0.0]))
+    o_new = env.reset()
+    print(o)
+    print(o_new)

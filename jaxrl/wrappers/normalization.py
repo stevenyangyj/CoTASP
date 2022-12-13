@@ -60,36 +60,29 @@ class NormalizeReward(gym.core.Wrapper):
     def __init__(
         self,
         env: gym.Env,
-        gamma: float = 0.99,
         epsilon: float = 1e-8,
     ):
-        """This wrapper will normalize immediate rewards s.t. their exponential moving average has a fixed variance.
+        """This wrapper will normalize immediate rewards
         Args:
             env (env): The environment to apply the wrapper
             epsilon (float): A stability parameter
-            gamma (float): The discount factor that is used in the exponential moving average.
         """
         super().__init__(env)
-        self.return_rms = RunningMeanStd(shape=())
-        self.returns = np.zeros(1)
-        self.gamma = gamma
+        self.reward_rms = RunningMeanStd(shape=())
         self.epsilon = epsilon
 
     def step(self, action):
         """Steps through the environment, normalizing the rewards returned."""
         obs, rews, dones, infos = self.env.step(action)
         rews = np.array([rews])
-        self.returns = self.returns * self.gamma + rews
         rews = self.normalize(rews)
-        if dones:
-            self.returns = np.zeros(1)
         rews = rews[0]
         return obs, rews, dones, infos
 
     def normalize(self, rews):
         """Normalizes the rewards with the running mean rewards and their variance."""
-        self.return_rms.update(self.returns)
-        return rews / np.sqrt(self.return_rms.var + self.epsilon)
+        self.reward_rms.update(rews)
+        return (rews - self.reward_rms.mean) / np.sqrt(self.reward_rms.var + self.epsilon)
 
 
 if __name__ == "__main__":
@@ -102,7 +95,7 @@ if __name__ == "__main__":
             next_obs, rew, done, _ = env.step(env.action_space.sample())
             print(i, rew)
 
-    env = gym.make('Hopper-v3')
+    env = gym.make('HalfCheetah-v3')
     env_wrapped = NormalizeReward(env)
 
     print_reward(env)

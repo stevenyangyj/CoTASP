@@ -19,7 +19,7 @@ from jaxrl.networks.common import MLP, Params, PRNGKey, \
 # from common import MLP, Params, PRNGKey, default_init, \
 #     activation_fn, RMSNorm, create_mask, zero_grads
 
-LOG_STD_MIN = -20.0
+LOG_STD_MIN = -10.0
 LOG_STD_MAX = 2.0
 
 
@@ -310,6 +310,7 @@ class HatTanhPolicy(nn.Module):
     use_layer_norm: bool = False
     use_rms_norm: bool = True
     final_fc_init_scale: float = 1.0
+    clip_mean: float = 2.0
     log_std_min: Optional[float] = None
     log_std_max: Optional[float] = None
     tanh_squash: bool = True
@@ -320,7 +321,7 @@ class HatTanhPolicy(nn.Module):
 
         self.backbones = [nn.Dense(hidn, kernel_init=default_init()) \
             for hidn in self.hidden_dims]
-        self.embeds_bb = [nn.Embed(self.task_num, hidn, embedding_init=default_init()) \
+        self.embeds_bb = [nn.Embed(self.task_num, hidn, embedding_init=default_init(1.0)) \
             for hidn in self.hidden_dims]
         
         self.mean_layer = nn.Dense(
@@ -340,6 +341,10 @@ class HatTanhPolicy(nn.Module):
             )
 
         self.relu1 = lambda x: jnp.minimum(jnp.maximum(x, 0), 1.)
+        self.hard_tanh = lambda x: jnp.where(
+            x > self.clip_mean, self.clip_mean, 
+            jnp.where(x < -self.clip_mean, -self.clip_mean, x)
+        )
         self.activation = activation_fn(self.name_activation)
         if self.use_layer_norm:
             self.normalizer = nn.LayerNorm(use_bias=False, use_scale=False)
@@ -365,8 +370,12 @@ class HatTanhPolicy(nn.Module):
         
         means = self.mean_layer(x)
 
-        if not self.tanh_squash:
-            means = nn.tanh(means)
+        # Avoid numerical issues by limiting the mean of the Gaussian
+        # to be in [-clip_mean, clip_mean]
+        means = self.hard_tanh(means)
+
+        # if not self.tanh_squash:
+        # means = nn.tanh(means)
 
         if self.state_dependent_std:
             log_stds = self.log_std_layer(x)
@@ -618,6 +627,7 @@ if __name__ == "__main__":
         hidden_dims=(256, 256, 256, 256),
         action_dim=4,
         task_num=20,
+        state_dependent_std=False,
         use_layer_norm=False,
         use_rms_norm=False)
     
@@ -626,6 +636,7 @@ if __name__ == "__main__":
         key, jnp.ones((1, 12)), jnp.array([0])
     )
     _, params = variables.pop('params')
+    print(params)
 
     # tx = optax.multi_transform({'train': optax.adam(0.1), 'fix': optax.set_to_zero()},
     #     create_mask(params, ['backbones', 'mean', 'log']))

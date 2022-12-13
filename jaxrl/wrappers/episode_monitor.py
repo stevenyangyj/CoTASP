@@ -20,6 +20,7 @@ class EpisodeMonitor(gym.ActionWrapper):
         self.start_time = time.time()
 
     def step(self, action: np.ndarray) -> TimeStep:
+
         observation, reward, done, info = self.env.step(action)
 
         self.reward_sum += reward

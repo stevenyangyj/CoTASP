@@ -109,7 +109,7 @@ def rate_activity(updates: Params) -> jnp.array:
     sums = 0
     count = 0
     updates = jax.tree_util.tree_map(
-        lambda x: jnp.where(x < 0.5, 0, 1.0), updates)
+        lambda x: jnp.where(x > 0, 1.0, 0), updates)
     for x in jax.tree_util.tree_leaves(updates):
         count += x.size
         sums += x.sum()
@@ -131,17 +131,51 @@ def reset_model(main_cls, model_cls, configs: dict, inputs: list):
     return main_cls.update_params(new_params)
 
 
-def reset_logstd_layer(key: PRNGKey, pi_params: Params, scale: float):
+def reset_logstd_layer(
+    key: PRNGKey, pi_params: Params, scale: float, state_dependent_std: bool
+    ):
     params_actor = unfreeze(pi_params)
-    kernel = params_actor['log_std_layer']['kernel']
-    bias = params_actor['log_std_layer']['bias']
+    if state_dependent_std:
+        kernel = params_actor['log_std_layer']['kernel']
+        bias = params_actor['log_std_layer']['bias']
 
-    init_kernel = default_init(scale)(key, kernel.shape, jnp.float32)
-    init_bias = jnp.zeros_like(bias)
+        init_kernel = default_init(scale)(key, kernel.shape, jnp.float32)
+        init_bias = jnp.zeros_like(bias)
 
-    params_actor['log_std_layer']['kernel'] = init_kernel
-    params_actor['log_std_layer']['bias'] = init_bias
+        params_actor['log_std_layer']['kernel'] = init_kernel
+        params_actor['log_std_layer']['bias'] = init_bias
+    else:
+        params_actor['log_std_layer'] = jnp.zeros_like(params_actor['log_std_layer'])
     return freeze(params_actor)
+
+
+def reset_part_params(
+    params: Params, 
+    masks: Params,
+    main_cls,
+    model_cls, 
+    configs: dict, 
+    inputs: list,
+    independent: bool=False,
+    ):
+    if independent:
+        model = model_cls(**configs)
+        _, init_params = model.init(*inputs).pop('params')
+    else:
+        rng, _ = jax.random.split(inputs[0])
+        init_params = {}
+        for k in masks:
+            init_params[k] = {}
+            for sub_k in masks[k]:
+                rng, key = jax.random.split(rng)
+                init_params[k][sub_k] = jax.random.normal(key, params[k][sub_k].shape) \
+                    * jnp.std(params[k][sub_k]) + jnp.mean(params[k][sub_k])
+
+    free_params = unfreeze(params)
+    for k in masks:
+        for sub_k in masks[k]:
+            free_params[k][sub_k] = free_params[k][sub_k] * (1.0 - masks[k][sub_k]) + init_params[k][sub_k] * masks[k][sub_k]
+    return main_cls.update_params(freeze(free_params))
 
 
 def set_optimizer(
@@ -618,5 +652,5 @@ class ModelActor:
 
 if __name__ == "__main__":
 
-    a = {'1': jnp.array([0.1, 0.2, 0.8, 0.9, 1.0, 0.0, 0.5, 0.49])}
+    a = {'1': jnp.array([0.0, 0.2, 0.8, 0.9, 1.0, 0.0, 0.5, 0.49])}
     print(jax.jit(rate_activity)(a))

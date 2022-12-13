@@ -271,7 +271,7 @@ class OnlineDictLearnerV2(object):
             recon = np.dot(gates, self.D)
             print('Gates Learning Stage')
             print(f'Rate of sparsity: {np.mean(gates == 0):.4f}')
-            print(f'Rate of activate: {np.mean(scaled_gates >= 0.5):.4f}')
+            print(f'Rate of activate: {np.mean(scaled_gates > 0):.4f}')
             print(f'Recontruction loss: {np.mean((sample - recon)**2):.4e}')
             print('----------------------------------')
 
@@ -397,10 +397,10 @@ if __name__ == "__main__":
 
     dict_learner = OnlineDictLearnerV2(
         n_features=384,
-        n_components=1024,
+        n_components=2048,
         seed=2,
         c=1.0,
-        alpha=1e-2,
+        alpha=1e-3,
         method='lasso_lars',
         positive_code=True,
         verbose=True)
@@ -413,10 +413,9 @@ if __name__ == "__main__":
         # compute gates for current task
         gates = dict_learner.get_gates(task_embedding[np.newaxis, :])
 
-        if idx < 10:
-            # mimic RL finetuning
-            gates += np.random.normal(size=gates.shape) * 0.1
-            gates = np.clip(gates, 0, 1.0)
+        # mimic RL finetuning
+        gates += np.random.normal(size=gates.shape) * 0.1
+        gates = np.clip(gates, 0, 1.0)
 
         # online update dictionary via CD
         dict_learner.update_dict(gates, task_embedding[np.newaxis, :])

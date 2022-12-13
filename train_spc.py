@@ -26,9 +26,10 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('env_name', 'cw3-test', 'Environment name.')
 flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/SPC/logs', 'Logging dir.')
-flags.DEFINE_integer('seed', 8, 'Random seed.')
+flags.DEFINE_integer('seed', 24, 'Random seed.')
 flags.DEFINE_string('base_algo', 'spc', 'base learning algorithm')
 
+flags.DEFINE_string('env_type', 'deterministic', 'The type of env is either deterministic or random_init_all')
 flags.DEFINE_boolean('normalize_reward', False, 'Normalize rewards')
 flags.DEFINE_integer('eval_episodes', 1, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
@@ -82,7 +83,7 @@ def main(_):
     # initialize SAC agent
     temp_env = get_single_env(
         TASK_SEQS[FLAGS.env_name][0]['task'], 
-        FLAGS.seed, randomization='deterministic')
+        FLAGS.seed, randomization=FLAGS.env_type)
     if algo == 'spc':
         agent = SPCLearner(
             FLAGS.seed,
@@ -99,7 +100,7 @@ def main(_):
     # continual learning loop
     eval_envs = []
     for dict_t in seq_tasks:
-        eval_envs.append(get_single_env(dict_t['task'], FLAGS.seed, randomization='deterministic'))
+        eval_envs.append(get_single_env(dict_t['task'], FLAGS.seed, randomization=FLAGS.env_type))
 
     total_env_steps = 0
     for task_idx, dict_t in enumerate(seq_tasks):
@@ -113,7 +114,7 @@ def main(_):
 
         # set continual world environment
         env = get_single_env(
-            dict_t['task'], FLAGS.seed, randomization='deterministic', 
+            dict_t['task'], FLAGS.seed, randomization=FLAGS.env_type, 
             normalize_reward=FLAGS.normalize_reward)
 
         # reset replay buffer
@@ -125,8 +126,16 @@ def main(_):
                            smoothing=0.1,
                            disable=not FLAGS.tqdm):
             if i < FLAGS.start_training:
-                action = env.action_space.sample()
+                if task_idx == 0:
+                    action = env.action_space.sample()
+                else:
+                    # uniform-previous strategy
+                    mask_id = np.random.choice(task_idx)
+                    action = agent.sample_actions(observation[np.newaxis], mask_id)
+                    action = np.asarray(action, dtype=np.float32).flatten()
             else:
+                # if i < FLAGS.start_training + int(1e4):
+                #     agent.ema_update_masks(task_idx)
                 action = agent.sample_actions(observation[np.newaxis], task_idx)
                 action = np.asarray(action, dtype=np.float32).flatten()
             next_observation, reward, done, info = env.step(action)
