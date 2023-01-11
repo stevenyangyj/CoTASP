@@ -178,7 +178,7 @@ def _sample_actions(
 
 
 @functools.partial(jax.jit, static_argnames=('finetune', 'first_task'))
-def _update_spc_jit(
+def _update_cotasp_jit(
     rng: PRNGKey, task_id: int, pms_mask: FrozenDict, cum_mask: FrozenDict, actor: AlterTrainableModel,
     critic: Model, target_critic: Model, temp: Model, batch: Batch, discount: float, 
     tau: float, target_entropy: float, finetune: bool, first_task: bool
@@ -292,15 +292,17 @@ def _update_spc_jit(
         **alpha_info}
 
 
-class SPCLearner(SACLearner):
+class CoTASPLearner(SACLearner):
     def __init__(
         self,
         seed: int,
         observations: jnp.ndarray,
         actions: jnp.ndarray,
         task_n: int,
-        max_step: int = 1000000,
-        finetune_steps: int = 10000,
+        load_policy_dir: Optional[str] = None,
+        load_dict_dir: Optional[str] = None,
+        update_dict = True,
+        update_coef = True,
         dict_configs: dict = {},
         optim_configs: dict = {},
         actor_configs: dict = {},
@@ -310,7 +312,7 @@ class SPCLearner(SACLearner):
         target_update_period: int = 1,
         target_entropy: Optional[float] = None,
         init_temperature: float = 1.0):
-        super(SPCLearner, self).__init__(seed, observations, actions, optim_configs,
+        super(CoTASPLearner, self).__init__(seed, observations, actions, optim_configs,
               actor_configs, critic_configs, discount, tau, target_update_period,
               target_entropy, init_temperature)
 
@@ -319,7 +321,7 @@ class SPCLearner(SACLearner):
         self.rng, actor_key = jax.random.split(self.rng, 2)
         actor_configs['task_num'] = task_n
         actor_configs['action_dim'] = action_dim
-        actor_def = policies.HatTanhPolicy(**actor_configs)
+        actor_def = policies.MetaPolicy(**actor_configs)
         actor = AlterTrainableModel.create(
             model_def=actor_def,
             inputs=[actor_key, observations, jnp.array([0])],
@@ -328,6 +330,9 @@ class SPCLearner(SACLearner):
             optimizer_one=set_optimizer(**optim_configs),
             optimizer_two=set_optimizer(**optim_configs)
         )
+
+        if load_policy_dir is not None:
+            actor.load(load_policy_dir)
 
         # get grads masking func
         def get_grad_masks(model, masks):
@@ -346,6 +351,10 @@ class SPCLearner(SACLearner):
                 verbose=True,
                 **dict_configs)
             self.dict4layers[f'embeds_bb_{id_layer}'] = dict_learner
+        
+        if load_dict_dir is not None:
+            for k in self.dict4layers.keys():
+                self.dict4layers[k].load(f'{load_dict_dir}/{k}.pkl')
 
         # self.masks = {}
         # self.target_masks = {}
@@ -353,11 +362,10 @@ class SPCLearner(SACLearner):
         self.actor = actor
         self.mask_cum = None
         self.mask_prm = None
-        self.finetune = False
         self.fir_task = True
-        self.max_step = max_step
+        self.update_dict = update_dict
+        self.update_coef = update_coef
         self.actor_cfgs = actor_configs
-        self.finetune_steps = finetune_steps
         self.get_grad_masks = get_grad_masks_jit
         self.task_embeddings = []
         self.task_encoder = SentenceTransformer('all-MiniLM-L12-v2')
@@ -380,23 +388,10 @@ class SPCLearner(SACLearner):
             if k.startswith('embeds'):
                 gates = self.dict4layers[k].get_gates(task_e)
                 gates = jnp.asarray(gates.flatten())
-                # self.masks[k] = gates.flatten()
-                # if self.fir_task:
-                #     self.target_masks[k] = gates.flatten()
                 # Replace the i-th coefficients
                 actor_params[k]['embedding'] = actor_params[k]['embedding'].at[task_id].set(gates.flatten())
         new_actor = self.actor.replace(params=freeze(actor_params))
         self.actor = new_actor
-
-    # def ema_update_masks(self, task_id: int):
-    #     actor_params = unfreeze(self.actor.params)
-    #     for k in actor_params:
-    #         if k.startswith('embeds'):
-    #             scores = (1.0 - self.tau) * self.target_masks[k] + self.tau * self.masks[k]
-    #             actor_params[k]['embedding'] = actor_params[k]['embedding'].at[task_id].set(scores)
-    #             self.target_masks[k] = scores
-    #     new_actor = self.actor.replace(params=freeze(actor_params))
-    #     self.actor = new_actor
 
     def sample_actions(self,
                        observations: np.ndarray,
@@ -411,15 +406,13 @@ class SPCLearner(SACLearner):
         actions = self.invalid_filter(actions)
         return actions
 
-    def update(self, task_id: int, batch: Batch) -> InfoDict:
-        if self.step == self.max_step - self.finetune_steps:
-            self.finetune = True
+    def update(self, task_id: int, batch: Batch, mask_finetune: bool=False) -> InfoDict:
 
-        new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_spc_jit(
+        new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_cotasp_jit(
             rng=self.rng, task_id=task_id, pms_mask=self.mask_prm, cum_mask=self.mask_cum,
             actor=self.actor, critic=self.critic, target_critic=self.target_critic, 
             temp=self.temp, batch=batch, discount=self.discount, tau=self.tau, target_entropy=self.target_entropy, 
-            finetune=self.finetune, first_task=self.fir_task)
+            finetune=mask_finetune, first_task=self.fir_task)
 
         self.step += 1
         self.rng = new_rng
@@ -430,7 +423,7 @@ class SPCLearner(SACLearner):
 
         return info
 
-    def end_task(self, task_id: int):
+    def end_task(self, task_id: int, save_actor_dir: str, save_dict_dir: str):
         self.step = 0
 
         self.rng, _, dicts = _sample_actions(self.rng, self.actor.apply_fn,
@@ -474,14 +467,14 @@ class SPCLearner(SACLearner):
             [key_temp])
 
         # reset unused params for actor
-        self.actor = utils_fn.reset_part_params(
+        new_params = utils_fn.reset_part_params(
             self.actor.params,
             self.mask_prm,
-            self.actor,
-            policies.HatTanhPolicy,
+            policies.MetaPolicy,
             self.actor_cfgs,
             [key_actor, self.dummy_o, jnp.array([0])],
             independent=False)
+        self.actor = self.actor.update_params(new_params)
 
         # reset log_std_layer params
         new_params_actor = utils_fn.reset_logstd_layer(
@@ -492,18 +485,38 @@ class SPCLearner(SACLearner):
         self.actor.update_params(new_params_actor)
 
         # update dictionary learners
-        for k in self.actor.params.keys():
-            if k.startswith('embeds'):
-                optimal_gates = self.actor.params[k]['embedding'][task_id]
-                optimal_gates = np.array([optimal_gates.flatten()])
-                task_e = self.task_embeddings[task_id]
-                # online update dictionary via CD
-                self.dict4layers[k].update_dict(optimal_gates, task_e)
+        dict_stats = {}
+        if self.update_dict:
+            for k in self.actor.params.keys():
+                if k.startswith('embeds'):
+                    optimal_gates = self.actor.params[k]['embedding'][task_id]
+                    optimal_gates = np.array([optimal_gates.flatten()])
+                    task_e = self.task_embeddings[task_id]
+                    # online update dictionary via CD
+                    self.dict4layers[k].update_dict(optimal_gates, task_e)
+                    dict_stats[k] = {
+                        'sim_mat': self.dict4layers[k]._compute_corr_matrix(pre=False),
+                        'change_of_d': np.array(self.dict4layers[k].change_of_dict)
+                    }
+        else:
+            for k in self.actor.params.keys():
+                if k.startswith('embeds'):
+                    dict_stats[k] = {
+                        'sim_mat': self.dict4layers[k]._compute_corr_matrix(pre=True),
+                        'change_of_d': 0
+                    }
 
         # reset optimizers
         self.actor = self.actor.reset_optimizer()
         self.critic = self.critic.reset_optimizer()
         self.temp = self.temp.reset_optimizer()
 
-        self.finetune = False  # close finetune for the next task
         self.fir_task = False  # trigger for the next task
+
+        # save actor params
+        self.actor.save(save_actor_dir)
+        # save dicts
+        for k in self.dict4layers.keys():
+            self.dict4layers[k].save(f'{save_dict_dir}/{k}.pkl')
+
+        return dict_stats

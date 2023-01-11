@@ -139,8 +139,10 @@ def reset_logstd_layer(
         kernel = params_actor['log_std_layer']['kernel']
         bias = params_actor['log_std_layer']['bias']
 
-        init_kernel = default_init(scale)(key, kernel.shape, jnp.float32)
-        init_bias = jnp.zeros_like(bias)
+        # init_kernel = default_init(scale)(key, kernel.shape, jnp.float32)
+        init_kernel = jax.random.normal(key, kernel.shape) * jnp.std(kernel) + jnp.mean(kernel)
+        _, key = jax.random.split(key)
+        init_bias = jax.random.normal(key, bias.shape) * jnp.std(bias) + jnp.mean(bias)
 
         params_actor['log_std_layer']['kernel'] = init_kernel
         params_actor['log_std_layer']['bias'] = init_bias
@@ -152,12 +154,10 @@ def reset_logstd_layer(
 def reset_part_params(
     params: Params, 
     masks: Params,
-    main_cls,
     model_cls, 
     configs: dict, 
     inputs: list,
-    independent: bool=False,
-    ):
+    independent: bool=False):
     if independent:
         model = model_cls(**configs)
         _, init_params = model.init(*inputs).pop('params')
@@ -175,7 +175,7 @@ def reset_part_params(
     for k in masks:
         for sub_k in masks[k]:
             free_params[k][sub_k] = free_params[k][sub_k] * (1.0 - masks[k][sub_k]) + init_params[k][sub_k] * masks[k][sub_k]
-    return main_cls.update_params(freeze(free_params))
+    return freeze(free_params)
 
 
 def set_optimizer(
@@ -189,6 +189,8 @@ def set_optimizer(
         optimizer = optax.adam(learning_rate=lr)
     elif optim_algo == 'adamw':
         optimizer = optax.adamw(learning_rate=lr, weight_decay=decay_coeff)
+    elif optim_algo == 'lamb':
+        optimizer = optax.lamb(learning_rate=lr)
     elif optim_algo == 'sgd':
         optimizer = optax.sgd(learning_rate=lr)
     elif optim_algo == 'radam':

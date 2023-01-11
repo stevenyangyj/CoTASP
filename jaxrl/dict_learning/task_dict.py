@@ -1,3 +1,5 @@
+import os
+import pickle
 from copy import deepcopy
 
 import jax
@@ -7,6 +9,7 @@ from scipy import spatial
 from sklearn.decomposition import DictionaryLearning, sparse_encode
 from sklearn.linear_model import Lasso
 from sklearn.utils import check_array, check_random_state
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 def _update_dict(
@@ -63,7 +66,6 @@ def _update_dict(
         B = Y.T @ code
 
     n_unused = 0
-
     for k in range(n_components):
         if A[k, k] > 1e-6:
             # 1e-6 is arbitrary but consistent with the spams implementation
@@ -252,7 +254,9 @@ class OnlineDictLearnerV2(object):
         self.method = method
         self.archives = None
         self._verbose = verbose
+        self.arch_gates = None
         self._positive_code = positive_code
+        self.change_of_dict = []
         
     def get_gates(self, sample: np.ndarray):
         gates = sparse_encode(
@@ -263,6 +267,12 @@ class OnlineDictLearnerV2(object):
             check_input=False,
             positive=self._positive_code,
             max_iter=10000)
+
+        # recording
+        if self.arch_gates is None:
+            self.arch_gates = gates
+        else:
+            self.arch_gates = np.vstack([self.arch_gates, gates])
 
         scaled_gates = self._scale_coeffs(gates)
         assert np.max(scaled_gates) == 1.0
@@ -307,6 +317,9 @@ class OnlineDictLearnerV2(object):
             recons = np.dot(self.C, self.D)
             print('Dicts Learning Stage')
             print(f'Pre-MSE loss: {np.mean((self.archives - recons)**2):.4e}')
+
+        old_D = deepcopy(self.D)
+
         # Update dictionary
         self.D = _update_dict(
             self.D,
@@ -319,6 +332,9 @@ class OnlineDictLearnerV2(object):
             random_state=self.rng,
             positive=False,
         )
+        
+        self.change_of_dict.append(np.linalg.norm(old_D - self.D)**2/self.D.size)
+
         # post-verbose
         if self._verbose:
             recons = np.dot(self.C, self.D)
@@ -346,15 +362,38 @@ class OnlineDictLearnerV2(object):
 
         return simi_matrix
 
-    def _compute_corr_matrix(self):
-        dist_matrix = spatial.distance_matrix(self.C, self.C)
+    def _compute_corr_matrix(self, pre=True):
+        if pre:
+            corr_matrix = cosine_similarity(self.arch_gates)
+        else:
+            corr_matrix = cosine_similarity(self.C)
 
         # compute correlation matrix
-        dist_matrix -= np.min(dist_matrix)
-        dist_matrix /= np.max(dist_matrix)
-        corr_matrix = 1 - dist_matrix
+        # dist_matrix -= np.min(dist_matrix)
+        # dist_matrix /= np.max(dist_matrix)
+        # corr_matrix = 1 - dist_matrix
 
         return corr_matrix
+
+    def save(self, save_path: str):
+        
+        saved_dict = {
+            "A": self.A,
+            "B": self.B,
+            "D": self.D,
+        }
+
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        with open(save_path, 'wb') as f:
+            pickle.dump(saved_dict, f)
+
+    def load(self, load_path: str):
+        with open(load_path, 'rb') as f:
+            loaded_dict = pickle.load(f)
+
+        self.A = loaded_dict["A"]
+        self.B = loaded_dict["B"]
+        self.D = loaded_dict["D"]
 
 
 if __name__ == "__main__":
@@ -420,6 +459,8 @@ if __name__ == "__main__":
         # online update dictionary via CD
         dict_learner.update_dict(gates, task_embedding[np.newaxis, :])
 
+    # print(dict_learner._compute_corr_matrix(pre=True))
+    print(dict_learner.change_of_dict)
     # mimic testing stage
     # res_gates = []
     # for idx, hint_task in enumerate(hints):

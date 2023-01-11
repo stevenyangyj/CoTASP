@@ -61,6 +61,7 @@ class NormalizeReward(gym.core.Wrapper):
         self,
         env: gym.Env,
         epsilon: float = 1e-8,
+        reward_alpha=0.001,
     ):
         """This wrapper will normalize immediate rewards
         Args:
@@ -68,21 +69,34 @@ class NormalizeReward(gym.core.Wrapper):
             epsilon (float): A stability parameter
         """
         super().__init__(env)
-        self.reward_rms = RunningMeanStd(shape=())
         self.epsilon = epsilon
+        self._reward_alpha = reward_alpha
+        self._reward_mean = 0.
+        self._reward_var = 1.
 
     def step(self, action):
         """Steps through the environment, normalizing the rewards returned."""
         obs, rews, dones, infos = self.env.step(action)
-        rews = np.array([rews])
-        rews = self.normalize(rews)
-        rews = rews[0]
+        rews = self._apply_normalize_reward(rews)
         return obs, rews, dones, infos
 
-    def normalize(self, rews):
-        """Normalizes the rewards with the running mean rewards and their variance."""
-        self.reward_rms.update(rews)
-        return (rews - self.reward_rms.mean) / np.sqrt(self.reward_rms.var + self.epsilon)
+    def _update_reward_estimate(self, reward):
+        self._reward_mean = (1 - self._reward_alpha) * \
+            self._reward_mean + self._reward_alpha * reward
+        self._reward_var = (
+            1 - self._reward_alpha
+        ) * self._reward_var + self._reward_alpha * np.square(
+            reward - self._reward_mean)
+
+    def _apply_normalize_reward(self, reward):
+        """Compute normalized reward.
+        Args:
+            reward (float): Reward.
+        Returns:
+            float: Normalized reward.
+        """
+        self._update_reward_estimate(reward)
+        return reward / (np.sqrt(self._reward_var) + self.epsilon)
 
 
 if __name__ == "__main__":
@@ -95,7 +109,7 @@ if __name__ == "__main__":
             next_obs, rew, done, _ = env.step(env.action_space.sample())
             print(i, rew)
 
-    env = gym.make('HalfCheetah-v3')
+    env = gym.make('Hopper-v3')
     env_wrapped = NormalizeReward(env)
 
     print_reward(env)

@@ -112,6 +112,7 @@ class NormalTanhPolicy(nn.Module):
     log_std_max: Optional[float] = None
     dropout_rate: Optional[float] = None
     init_mean: Optional[jnp.ndarray] = None
+    clip_mean: float = 1.0
     tanh_squash: bool = True
 
     @nn.compact
@@ -301,7 +302,7 @@ class Coder(nn.Module):
         return codes
 
 
-class HatTanhPolicy(nn.Module):
+class MetaPolicy(nn.Module):
     hidden_dims: Sequence[int]
     action_dim: int
     task_num: int
@@ -310,7 +311,7 @@ class HatTanhPolicy(nn.Module):
     use_layer_norm: bool = False
     use_rms_norm: bool = True
     final_fc_init_scale: float = 1.0
-    clip_mean: float = 2.0
+    clip_mean: float = 1.0
     log_std_min: Optional[float] = None
     log_std_max: Optional[float] = None
     tanh_squash: bool = True
@@ -623,7 +624,7 @@ def sample_actions(
 if __name__ == "__main__":
     import optax
 
-    actor = HatTanhPolicy(
+    actor = MetaPolicy(
         hidden_dims=(256, 256, 256, 256),
         action_dim=4,
         task_num=20,
