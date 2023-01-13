@@ -34,7 +34,7 @@ def evaluate(agent, env: gym.Env, num_episodes: int, with_task_embed=False, task
         stats['success'] = successes / num_episodes
     return stats
 
-def evaluate_cl(agent, envs: List[gym.Env], num_episodes: int) -> Dict[str, float]:
+def evaluate_cl(agent, envs: List[gym.Env], num_episodes: int, naive_sac=False) -> Dict[str, float]:
     stats = {}
     sum_return = 0.0
     sum_success = 0.0
@@ -51,8 +51,12 @@ def evaluate_cl(agent, envs: List[gym.Env], num_episodes: int) -> Dict[str, floa
         for _ in range(num_episodes):
             observation, done = env.reset(), False
             while not done:
-                action = agent.sample_actions(observation[np.newaxis], task_i, temperature=0)
-                action = np.asarray(action, dtype=np.float32).flatten()
+                if naive_sac:
+                    action = agent.sample_actions(observation[np.newaxis], temperature=0)
+                    action = np.asarray(action, dtype=np.float32).flatten()
+                else:
+                    action = agent.sample_actions(observation[np.newaxis], task_i, temperature=0)
+                    action = np.asarray(action, dtype=np.float32).flatten()
                 observation, _, done, info = env.step(action)
             for k in list_log_keys:
                 stats[f'{task_i}-{env.name}/{k}'].append(info['episode'][k])

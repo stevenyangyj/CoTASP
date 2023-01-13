@@ -18,10 +18,9 @@ def update(key: PRNGKey, actor: Model, critic: Model, temp: Model,
         q = jnp.minimum(q1, q2)
         actor_loss = (log_probs * temp() - q).mean()
         return actor_loss, {
-            'sac_pi_loss': actor_loss,
+            'actor_loss': actor_loss,
             'entropy': -log_probs.mean(),
-            'L1_codes': jnp.sum(jnp.abs(actor_params['codes'])),
-            'L1_components': jnp.sum(jnp.abs(actor_params['components']))
+            'means': actions.mean()
         }
 
     new_actor, info = actor.apply_gradient(actor_loss_fn)

@@ -20,19 +20,15 @@ def target_update(critic: Model, target_critic: Model, tau: float) -> Model:
 
 
 def update(key: PRNGKey, actor: Model, critic: Model, target_critic: Model,
-           temp: Model, batch: Batch, discount: float,
-           backup_entropy: bool) -> Tuple[Model, InfoDict]:
+           temp: Model, batch: Batch, discount: float) -> Tuple[Model, InfoDict]:
 
     dist = actor(batch.next_observations)
     next_actions = dist.sample(seed=key)
     next_log_probs = dist.log_prob(next_actions)
     next_q1, next_q2 = target_critic(batch.next_observations, next_actions)
     next_q = jnp.minimum(next_q1, next_q2)
-
+    next_q -= temp() * next_log_probs
     target_q = batch.rewards + discount * batch.masks * next_q
-
-    if backup_entropy:
-        target_q -= discount * batch.masks * temp() * next_log_probs
 
     def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         q1, q2 = critic.apply_fn({'params': critic_params}, batch.observations,

@@ -110,7 +110,6 @@ class NormalTanhPolicy(nn.Module):
     final_fc_init_scale: float = 1.0
     log_std_min: Optional[float] = None
     log_std_max: Optional[float] = None
-    dropout_rate: Optional[float] = None
     init_mean: Optional[jnp.ndarray] = None
     clip_mean: float = 1.0
     tanh_squash: bool = True
@@ -144,15 +143,22 @@ class NormalTanhPolicy(nn.Module):
         log_std_max = self.log_std_max or LOG_STD_MAX
         log_stds = jnp.clip(log_stds, log_std_min, log_std_max)
 
-        if not self.tanh_squash:
-            means = nn.tanh(means)
+        # Avoid numerical issues by limiting the mean of the Gaussian
+        # to be in [-clip_mean, clip_mean]
+        means = jnp.where(
+            means > self.clip_mean, self.clip_mean, 
+            jnp.where(means < -self.clip_mean, -self.clip_mean, means)
+        )
 
-        base_dist = tfd.MultivariateNormalDiag(loc=means,
-                                               scale_diag=jnp.exp(log_stds) *
-                                               temperature)
+        # if not self.tanh_squash:
+        #     means = nn.tanh(means)
+
+        # numerically stable method
+        base_dist = tfd.Normal(loc=means, scale=jnp.exp(log_stds) * temperature)
+
         if self.tanh_squash:
-            return tfd.TransformedDistribution(distribution=base_dist,
-                                               bijector=tfb.Tanh())
+            return tfd.Independent(TanhTransformedDistribution(base_dist), 
+                                   reinterpreted_batch_ndims=1)
         else:
             return base_dist
 

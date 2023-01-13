@@ -43,6 +43,26 @@ TASK_SEQS = {
         {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
         {'task': "stick-pull-v1", 'hint': 'Grasp a stick and pull a box with the stick.'}
     ],
+    "cw2-ab-coffee-button": [
+        {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
+        {'task': "coffee-button-v1", 'hint': 'Push a button on the coffee machine.'}
+    ],
+    "cw2-ab-handle-press": [
+        {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
+        {'task': "handle-press-v1", 'hint': 'Press a handle down.'}
+    ],
+    "cw2-ab-window-open": [
+        {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
+        {'task': "window-open-v1", 'hint': 'Push and open a window.'}
+    ],
+    "cw2-ab-reach": [
+        {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
+        {'task': "reach-v1", 'hint': 'Reach a goal position.'}
+    ],
+    "cw2-ab-button-press": [
+        {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
+        {'task': "button-press-v1", 'hint': 'Press a button.'}
+    ],
     "cw3-test": [
         {'task': "stick-pull-v1", 'hint': 'Grasp a stick and pull a box with the stick.'},
         {'task': "push-back-v1", 'hint': 'Pull a puck to a goal.'},

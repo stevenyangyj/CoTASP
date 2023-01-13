@@ -26,12 +26,11 @@ from jaxrl.networks.common import InfoDict, Model, PRNGKey, Params, \
 from jaxrl.dict_learning.task_dict import OnlineDictLearnerV2
 
 
-@functools.partial(jax.jit, static_argnames=('backup_entropy', 'update_target'))
+@jax.jit
 def _update_jit(
     rng: PRNGKey, actor: Model, critic: Model, target_critic: Model,
     temp: Model, batch: Batch, discount: float, tau: float,
-    target_entropy: float, backup_entropy: bool, update_target: bool
-) -> Tuple[PRNGKey, Model, Model, Model, Model, InfoDict]:
+    target_entropy: float) -> Tuple[PRNGKey, Model, Model, Model, Model, InfoDict]:
 
     rng, key = jax.random.split(rng)
     new_critic, critic_info = update_critic(key,
@@ -40,12 +39,9 @@ def _update_jit(
                                             target_critic,
                                             temp,
                                             batch,
-                                            discount,
-                                            backup_entropy=backup_entropy)
-    if update_target:
-        new_target_critic = target_update(new_critic, target_critic, tau)
-    else:
-        new_target_critic = target_critic
+                                            discount)
+
+    new_target_critic = target_update(new_critic, target_critic, tau)
 
     rng, key = jax.random.split(rng)
     new_actor, actor_info = update_actor(key, actor, new_critic, temp, batch)
@@ -126,6 +122,14 @@ class SACLearner(object):
 
         self.step = 0
 
+        self.invalid_filter = jax.jit(
+            lambda x:
+            jax.tree_map(
+                lambda y: jnp.where(jnp.logical_or(jnp.isnan(y), jnp.isinf(y)), 0, y),
+                x
+            )
+        )
+
     def sample_actions(self,
                        observations: np.ndarray,
                        temperature: float = 1.0) -> jnp.ndarray:
@@ -134,16 +138,15 @@ class SACLearner(object):
                                                temperature)
         self.rng = rng
 
-        actions = np.asarray(actions)
-        return np.clip(actions, -1, 1).flatten()
+        actions = self.invalid_filter(actions)
+        return actions
 
     def update(self, batch: Batch) -> InfoDict:
         self.step += 1
 
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_jit(
             self.rng, self.actor, self.critic, self.target_critic, self.temp,
-            batch, self.discount, self.tau, self.target_entropy,
-            self.step % self.target_update_period == 0)
+            batch, self.discount, self.tau, self.target_entropy)
 
         self.rng = new_rng
         self.actor = new_actor
@@ -153,10 +156,32 @@ class SACLearner(object):
 
         return info
 
-    def reset_models(self):
+    def end_task(self, save_actor_dir: str):
+
+        # reset params for critic ,target_critic and temperature
+        self.rng, key_critic, key_temp = jax.random.split(self.rng, 3)
+
+        self.critic = utils_fn.reset_model(
+            self.critic, 
+            critic_net.DoubleCritic,
+            self.critic_cfgs,
+            [key_critic, self.dummy_o, self.dummy_a])
+
+        self.target_critic = self.target_critic.update_params(self.critic.params)
+
+        self.temp = utils_fn.reset_model(
+            self.temp,
+            temperature.Temperature,
+            {'init_log_temp': self.init_temp},
+            [key_temp])
+
+        # reset optimizers
         self.actor = self.actor.reset_optimizer()
         self.critic = self.critic.reset_optimizer()
         self.temp = self.temp.reset_optimizer()
+
+        # save actor params
+        self.actor.save(save_actor_dir)
 
 
 @functools.partial(jax.jit, static_argnames=('actor_apply_fn'))
@@ -332,7 +357,7 @@ class CoTASPLearner(SACLearner):
         )
 
         if load_policy_dir is not None:
-            actor.load(load_policy_dir)
+            actor = actor.load(load_policy_dir)
 
         # get grads masking func
         def get_grad_masks(model, masks):
@@ -369,14 +394,6 @@ class CoTASPLearner(SACLearner):
         self.get_grad_masks = get_grad_masks_jit
         self.task_embeddings = []
         self.task_encoder = SentenceTransformer('all-MiniLM-L12-v2')
-
-        self.invalid_filter = jax.jit(
-            lambda x:
-            jax.tree_map(
-                lambda y: jnp.where(jnp.logical_or(jnp.isnan(y), jnp.isinf(y)), 0, y),
-                x
-            )
-        )
 
     def start_task(self, task_id: int, description: str):
         task_e = self.task_encoder.encode(description)[np.newaxis]
@@ -511,7 +528,8 @@ class CoTASPLearner(SACLearner):
         self.critic = self.critic.reset_optimizer()
         self.temp = self.temp.reset_optimizer()
 
-        self.fir_task = False  # trigger for the next task
+        if self.fir_task:
+            self.fir_task = not self.fir_task  # trigger for the next task
 
         # save actor params
         self.actor.save(save_actor_dir)
@@ -520,3 +538,30 @@ class CoTASPLearner(SACLearner):
             self.dict4layers[k].save(f'{save_dict_dir}/{k}.pkl')
 
         return dict_stats
+
+    def freeze_task_params(self, task_id):
+        self.rng, _, dicts = _sample_actions(self.rng, self.actor.apply_fn,
+                                             self.actor.params, self.dummy_o, 
+                                             jnp.array([task_id]))
+        mask_now = dicts['masks']
+        # cumulative attention from all the previous tasks
+        if self.mask_cum is None:
+            self.mask_cum = deepcopy(mask_now)
+        else:
+            self.mask_cum = unfreeze(self.mask_cum)
+            for k in self.mask_cum.keys():
+                self.mask_cum[k]['embedding'] = jnp.maximum(
+                    self.mask_cum[k]['embedding'], 
+                    mask_now[k]['embedding'])
+        self.mask_cum = freeze(self.mask_cum)
+
+        # To condition the training of task t + 1, we compute 
+        # the gradient masks according to cumulative attention weights
+        grad_masks = self.get_grad_masks(
+            {'params': self.actor.params}, self.mask_cum)
+        grad_masks = jax.tree_util.tree_map(
+            lambda x: jnp.where(x < 1.0, 0, 1.0), grad_masks)
+        self.mask_prm = freeze(grad_masks)
+
+        if self.fir_task:
+            self.fir_task = not self.fir_task  # trigger for the next task

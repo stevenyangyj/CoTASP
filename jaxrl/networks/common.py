@@ -362,18 +362,7 @@ class Model:
     def update_params(self, new_params: Params) -> 'Model':
         return self.replace(params=new_params)
     
-    def reset_optimizer(self) -> 'Model':
-        # reset optimizer for the next task 
-        # skip the count argument.
-        # adam_state = self.opt_state[1][0]
-        # mu = adam_state.mu
-        # mu = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), mu)
-        # nu = adam_state.nu
-        # nu = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), nu)
-        # init_opt_state = (self.opt_state[0], (
-        #     adam_state._replace(mu=mu, nu=nu), self.opt_state[1][1:])
-        # )
-        
+    def reset_optimizer(self) -> 'Model': 
         # contain the count argument
         init_opt_state = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x),
                                                 self.opt_state)
@@ -384,9 +373,10 @@ class Model:
         with open(save_path, 'wb') as f:
             f.write(flax.serialization.to_bytes(self.params))
 
-    def load(self, load_path: str) -> 'Model':
+    def load(self, load_path: str) -> 'AlterTrainableModel':
         with open(load_path, 'rb') as f:
             params = flax.serialization.from_bytes(self.params, f.read())
+            params = jax.tree_util.tree_map(jnp.array, params)
         return self.replace(params=params)
 
 
@@ -512,6 +502,7 @@ class AlterTrainableModel:
     def load(self, load_path: str) -> 'AlterTrainableModel':
         with open(load_path, 'rb') as f:
             params = flax.serialization.from_bytes(self.params, f.read())
+            params = jax.tree_util.tree_map(jnp.array, params)
         return self.replace(params=params)
 
 

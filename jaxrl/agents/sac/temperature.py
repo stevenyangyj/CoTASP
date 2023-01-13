@@ -26,7 +26,6 @@ def update(temp: Model, entropy: float,
 
     def temperature_loss_fn(temp_params):
         temperature = temp.apply_fn({'params': temp_params})
-        # temperature = jnp.clip(temperature, MIN_TEMP, MAX_TEMP)
         temp_loss = temperature * (entropy - target_entropy).mean()
         return temp_loss, {'temperature': temperature, 'temp_loss': temp_loss}
 
