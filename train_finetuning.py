@@ -18,12 +18,12 @@ from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', "cw2-ab-coffee-button", 'Environment name.')
-flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/MORE/src/jaxrl/logs/', 'Tensorboard logging dir.')
+flags.DEFINE_string('env_name', "cw2-ab-button-press", 'Environment name.')
+flags.DEFINE_string('save_dir', '', 'Tensorboard logging dir.')
 flags.DEFINE_integer('seed', 66, 'Random seed.')
-flags.DEFINE_string('base_algo', 'comps', 'base learning algorithm')
+flags.DEFINE_string('base_algo', 'sac', 'base learning algorithm')
 
-flags.DEFINE_string('env_type', 'deterministic', 'The type of env is either deterministic or random_init_all')
+flags.DEFINE_string('env_type', 'random_init_all', 'The type of env is either deterministic or random_init_all')
 flags.DEFINE_boolean('normalize_reward', False, 'Normalize rewards')
 flags.DEFINE_integer('eval_episodes', 1, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
@@ -37,7 +37,7 @@ flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 
 flags.DEFINE_boolean('tqdm', False, 'Use tqdm progress bar.')
 flags.DEFINE_string('wandb_mode', 'online', 'Track experiments with Weights and Biases.')
-flags.DEFINE_string('wandb_project_name', "jaxrl_comps", "The wandb's project name.")
+flags.DEFINE_string('wandb_project_name', "jaxrl_sac", "The wandb's project name.")
 flags.DEFINE_string('wandb_entity', None, "the entity (team) of wandb's project")
 config_flags.DEFINE_config_file(
     'config',
@@ -78,7 +78,7 @@ def main(_):
     temp_env = get_single_env(
         TASK_SEQS[FLAGS.env_name][0]['task'], FLAGS.seed, 
         randomization=FLAGS.env_type)
-    if algo == 'comps':
+    if algo == 'sac':
         agent = SACLearner(
             FLAGS.seed,
             temp_env.observation_space.sample()[np.newaxis],

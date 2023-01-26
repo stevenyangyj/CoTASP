@@ -425,6 +425,9 @@ class CoTASPLearner(SACLearner):
 
     def update(self, task_id: int, batch: Batch, mask_finetune: bool=False) -> InfoDict:
 
+        if not self.update_coef:
+            mask_finetune = False
+
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_cotasp_jit(
             rng=self.rng, task_id=task_id, pms_mask=self.mask_prm, cum_mask=self.mask_cum,
             actor=self.actor, critic=self.critic, target_critic=self.target_critic, 

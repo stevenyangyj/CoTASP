@@ -1,9 +1,5 @@
 '''
-Online Dictionary Learning for Sparse Coding + Prompt-conditional Actor;
-
-Encoding prompts via online dictionary learning
-
-Sparse Prompt Coding (SPC)
+CONTINUAL TASK ALLOCATION IN META-POLICY NETWORK VIA SPARSE PROMPTING
 '''
 
 import itertools
@@ -26,11 +22,11 @@ from continual_world import TASK_SEQS, get_single_env
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('env_name', 'cw2-ab-button-press', 'Environment name.')
-flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/SPC/logs', 'Logging dir.')
-flags.DEFINE_integer('seed', 66, 'Random seed.')
+flags.DEFINE_string('save_dir', '', 'Logging dir.')
+flags.DEFINE_integer('seed', 60, 'Random seed.')
 flags.DEFINE_string('base_algo', 'cotasp', 'base learning algorithm')
 
-flags.DEFINE_string('env_type', 'deterministic', 'The type of env is either deterministic or random_init_all')
+flags.DEFINE_string('env_type', 'random_init_all', 'The type of env is either deterministic or random_init_all')
 flags.DEFINE_boolean('normalize_reward', False, 'Normalize rewards')
 flags.DEFINE_integer('eval_episodes', 1, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
@@ -94,8 +90,8 @@ def main(_):
             temp_env.observation_space.sample()[np.newaxis],
             temp_env.action_space.sample()[np.newaxis], 
             10,
-            "logs/saved_actors/cw10__cotasp__56__1673447910.json",
-            "logs/saved_dicts/cw10__cotasp__56__1673447910",
+            "",
+            "",
             **algo_kwargs)
         del temp_env
     else:

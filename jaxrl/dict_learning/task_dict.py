@@ -6,10 +6,23 @@ import jax
 import numpy as np
 import flax.linen as nn
 from scipy import spatial
+from scipy.special import softmax
 from sklearn.decomposition import DictionaryLearning, sparse_encode
 from sklearn.linear_model import Lasso
 from sklearn.utils import check_array, check_random_state
 from sklearn.metrics.pairwise import cosine_similarity
+
+
+def overlap_1(arr1, arr2):
+    return np.mean(arr1 == arr2)
+
+def overlap_2(arr1, arr2):
+    return np.mean(np.logical_and(arr1, arr2))
+
+def overlap_3(arr1, arr2):
+    n_union = np.sum(np.logical_or(arr1, arr2))
+    n_intersected = np.sum(np.logical_and(arr1, arr2))
+    return n_intersected / n_union
 
 
 def _update_dict(
@@ -73,7 +86,7 @@ def _update_dict(
             dictionary[k] += (B[:, k] - A[k] @ dictionary) / A[k, k]
         else:
             # kth atom is almost never used -> sample a new one from the data
-            newd = Y[random_state.choice(n_samples)]
+            # newd = Y[random_state.choice(n_samples)]
 
             # add small noise to avoid making the sparse coding ill conditioned
             # noise_level = 0.01 * (newd.std() or 1)  # avoid 0 std
@@ -81,10 +94,12 @@ def _update_dict(
             # dictionary[k] = newd + noise
 
             # randomly initialize kth atom
-            scale = 1.0 * (newd.std() or 1)  # avoid 0 std
-            dictionary[k] = random_state.normal(loc=0.0, scale=scale, size=len(newd))
-            code[:, k] = 0
-            n_unused += 1
+            # scale = 1.0 * (newd.std() or 1)  # avoid 0 std
+            # dictionary[k] = random_state.normal(loc=0.0, scale=scale, size=len(newd))
+            # code[:, k] = 0
+            # n_unused += 1
+
+            pass
 
         if positive:
             np.clip(dictionary[k], 0, None, out=dictionary[k])
@@ -234,6 +249,7 @@ class OnlineDictLearnerV2(object):
                  alpha: float=1e-3,
                  method: str='lasso_lars', # ['lasso_cd', 'lasso_lars', 'threshold']
                  positive_code: bool=False,
+                 scale_code: bool=False,
                  verbose=False):
 
         self.N = 0
@@ -256,6 +272,7 @@ class OnlineDictLearnerV2(object):
         self._verbose = verbose
         self.arch_gates = None
         self._positive_code = positive_code
+        self.scale_code = scale_code
         self.change_of_dict = []
         
     def get_gates(self, sample: np.ndarray):
@@ -274,13 +291,16 @@ class OnlineDictLearnerV2(object):
         else:
             self.arch_gates = np.vstack([self.arch_gates, gates])
 
-        scaled_gates = self._scale_coeffs(gates)
-        assert np.max(scaled_gates) == 1.0
+        if self.scale_code:
+            scaled_gates = self._scale_coeffs(gates)
+            assert np.max(scaled_gates) == 1.0
+        else:
+            scaled_gates = gates
         
         if self._verbose:
             recon = np.dot(gates, self.D)
             print('Gates Learning Stage')
-            print(f'Rate of sparsity: {np.mean(gates == 0):.4f}')
+            print(f'Rate of deactivate: {np.mean(gates <= 0):.4f}')
             print(f'Rate of activate: {np.mean(scaled_gates > 0):.4f}')
             print(f'Recontruction loss: {np.mean((sample - recon)**2):.4e}')
             print('----------------------------------')
@@ -289,7 +309,8 @@ class OnlineDictLearnerV2(object):
 
     def update_dict(self, codes: np.ndarray, sample: np.ndarray):
         self.N += 1
-        codes = self._rescale_coeffs(codes)
+        if self.scale_code:
+            codes = self._rescale_coeffs(codes)
         # recording
         if self.C is None:
             self.C = codes
@@ -330,7 +351,7 @@ class OnlineDictLearnerV2(object):
             self.c,
             verbose=self._verbose,
             random_state=self.rng,
-            positive=False,
+            positive=self._positive_code,
         )
         
         self.change_of_dict.append(np.linalg.norm(old_D - self.D)**2/self.D.size)
@@ -375,6 +396,16 @@ class OnlineDictLearnerV2(object):
 
         return corr_matrix
 
+    def _compute_overlapping(self):
+        binary_masks = np.heaviside(self.arch_gates, 0)
+        overlap_mat = np.empty((binary_masks.shape[0], binary_masks.shape[0]))
+
+        for i in range(binary_masks.shape[0]):
+            for j in range(binary_masks.shape[0]):
+                overlap_mat[i, j] = overlap_3(binary_masks[i], binary_masks[j])
+
+        return overlap_mat
+
     def save(self, save_path: str):
         
         saved_dict = {
@@ -416,32 +447,33 @@ if __name__ == "__main__":
         'Pick and place a puck onto a shelf.',
         'Push and close a window.',
         'Unplug a peg sideways.',
-        'Hammer a screw on the wall.',
-        'Bypass a wall and push a puck to a goal.',
-        'Rotate the faucet clockwise.',
-        'Pull a puck to a goal.',
-        'Grasp a stick and pull a box with the stick.',
-        'Press a handle down sideways.',
-        'Push the puck to a goal.',
-        'Pick and place a puck onto a shelf.',
-        'Push and close a window.',
-        'Unplug a peg sideways.'
+        # 'Hammer a screw on the wall.',
+        # 'Bypass a wall and push a puck to a goal.',
+        # 'Rotate the faucet clockwise.',
+        # 'Pull a puck to a goal.',
+        # 'Grasp a stick and pull a box with the stick.',
+        # 'Press a handle down sideways.',
+        # 'Push the puck to a goal.',
+        # 'Pick and place a puck onto a shelf.',
+        # 'Push and close a window.',
+        # 'Unplug a peg sideways.'
     ]
     task_idx = [
-        'task 0', 'task 1', 'task 2', 'task 3', 'task 4',
-        'task 5', 'task 6', 'task 7', 'task 8', 'task 9',
-        'task 0', 'task 1', 'task 2', 'task 3', 'task 4',
-        'task 5', 'task 6', 'task 7', 'task 8', 'task 9'
+        'task 1', 'task 2', 'task 3', 'task 4', 'task 5',
+        'task 6', 'task 7', 'task 8', 'task 9', 'task 10',
+        # 'task 11', 'task 12', 'task 13', 'task 14', 'task 15',
+        # 'task 15', 'task 17', 'task 18', 'task 19', 'task 20'
     ]
 
     dict_learner = OnlineDictLearnerV2(
         n_features=384,
-        n_components=2048,
+        n_components=1024,
         seed=2,
         c=1.0,
         alpha=1e-3,
         method='lasso_lars',
-        positive_code=True,
+        positive_code=False,
+        scale_code=False,
         verbose=True)
 
     # mimic training stage
@@ -454,13 +486,13 @@ if __name__ == "__main__":
 
         # mimic RL finetuning
         gates += np.random.normal(size=gates.shape) * 0.1
-        gates = np.clip(gates, 0, 1.0)
+        # gates = np.clip(gates, 0, 1.0)
 
         # online update dictionary via CD
         dict_learner.update_dict(gates, task_embedding[np.newaxis, :])
 
     # print(dict_learner._compute_corr_matrix(pre=True))
-    print(dict_learner.change_of_dict)
+    # print(dict_learner.change_of_dict)
     # mimic testing stage
     # res_gates = []
     # for idx, hint_task in enumerate(hints):
@@ -474,15 +506,17 @@ if __name__ == "__main__":
     # plot similarity / correlation
     # mat = dict_learner._compute_sim_matrix(testing_gates)
     # mat = dict_learner._compute_corr_matrix()
+    mat = dict_learner._compute_overlapping()
 
-    # fig, ax = plt.subplots(figsize=(7, 5)) # 10: (7, 5), 20: (12, 8)
+    fig, ax = plt.subplots(figsize=(7, 5)) # 10: (7, 5), 20: (12, 8)
 
-    # im, cbar = heatmap(mat, task_idx, task_idx, ax=ax,
-    #                 cmap="YlGn", font_label={'size': 12},
-    #                 x_label='', y_label='', 
-    #                 cbarlabel="Similarity")
-    # texts = annotate_heatmap(im, valfmt="{x:.1f}")
+    # YlGn, 
+    im, cbar = heatmap(mat, task_idx, task_idx, ax=ax,
+                    cmap="Blues", font_label={'size': 12},
+                    x_label='', y_label='', 
+                    cbarlabel="Prompt Similarity")
+    texts = annotate_heatmap(im, valfmt="{x:.1f}")
 
     # fig.tight_layout()
-    # plt.savefig('corr_plot_10.pdf', bbox_inches='tight', pad_inches=0.02)
+    plt.savefig('overlap_cw10.svg', bbox_inches='tight', pad_inches=0.02)
     

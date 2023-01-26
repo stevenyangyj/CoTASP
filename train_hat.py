@@ -18,7 +18,7 @@ import continual_world as cw
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('env_name', 'cw3-test', 'Environment name.')
-flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/MORE/src/jaxrl/logs/', 'Tensorboard logging dir.')
+flags.DEFINE_string('save_dir', '', 'Tensorboard logging dir.')
 flags.DEFINE_integer('seed', 0, 'Random seed.')
 flags.DEFINE_string('base_algo', 'hat_sac', 'base learning algorithm')
 
