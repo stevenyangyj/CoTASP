@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as random
 import numpy as np
+from jax import custom_jvp
 from flax.linen.module import init
 from tensorflow_probability.substrates import jax as tfp
 
@@ -18,6 +19,7 @@ from jaxrl.networks.common import MLP, Params, PRNGKey, \
 
 # from common import MLP, Params, PRNGKey, default_init, \
 #     activation_fn, RMSNorm, create_mask, zero_grads
+
 
 LOG_STD_MIN = -10.0
 LOG_STD_MAX = 2.0
@@ -308,6 +310,30 @@ class Coder(nn.Module):
         return codes
 
 
+@custom_jvp
+def clip_fn(x):
+    return jnp.minimum(jnp.maximum(x, 0), 1.0)
+
+@clip_fn.defjvp
+def f_jvp(primals, tangents):
+    # Custom derivative rule for clip_fn 
+    # x' = 1, when 0 < x < 1;
+    # x' = 0  otherwise.
+    x, = primals
+    x_dot, = tangents
+    ans = clip_fn(x)
+    ans_dot = jnp.where(x >= 1.0, 0, jnp.where(x <= 0, 0, 1.0)) * x_dot
+    return ans, ans_dot
+
+def ste_step_fn(x):
+    # Create an exactly-zero expression with Sterbenz lemma that has
+    # an exactly-one gradient.
+    # Straight-through estimator of step function
+    # its derivative is equal to 1 when 0 < x < 1, 0 otherwise.
+    zero = clip_fn(x) - jax.lax.stop_gradient(clip_fn(x))
+    return zero + jax.lax.stop_gradient(jnp.heaviside(x, 0))
+
+
 class MetaPolicy(nn.Module):
     hidden_dims: Sequence[int]
     action_dim: int
@@ -315,7 +341,7 @@ class MetaPolicy(nn.Module):
     state_dependent_std: bool = True
     name_activation: str = 'leaky_relu'
     use_layer_norm: bool = False
-    use_rms_norm: bool = True
+    use_rms_norm: bool = False
     final_fc_init_scale: float = 1.0
     clip_mean: float = 1.0
     log_std_min: Optional[float] = None
@@ -328,7 +354,7 @@ class MetaPolicy(nn.Module):
 
         self.backbones = [nn.Dense(hidn, kernel_init=default_init()) \
             for hidn in self.hidden_dims]
-        self.embeds_bb = [nn.Embed(self.task_num, hidn, embedding_init=default_init(1.0)) \
+        self.embeds_bb = [nn.Embed(self.task_num, hidn, embedding_init=default_init()) \
             for hidn in self.hidden_dims]
         
         self.mean_layer = nn.Dense(
@@ -347,7 +373,6 @@ class MetaPolicy(nn.Module):
                 (self.action_dim,)
             )
 
-        self.relu1 = lambda x: jnp.minimum(jnp.maximum(x, 0), 1.)
         self.hard_tanh = lambda x: jnp.where(
             x > self.clip_mean, self.clip_mean, 
             jnp.where(x < -self.clip_mean, -self.clip_mean, x)
@@ -368,10 +393,10 @@ class MetaPolicy(nn.Module):
         for i, layer in enumerate(self.backbones):
             x = layer(x)
             # straight-through estimator
-            g = self.relu1(self.embeds_bb[i](t))
-            masks[layer.name] = {'embedding': g}
+            phi_l = ste_step_fn(self.embeds_bb[i](t))
+            masks[layer.name] = phi_l
             x = self.activation(x)
-            x = x * jnp.broadcast_to(g, x.shape)
+            x = x * jnp.broadcast_to(phi_l, x.shape)
             if i == 0 and (self.use_layer_norm or self.use_rms_norm):
                 x = self.normalizer(x)
         
@@ -380,9 +405,6 @@ class MetaPolicy(nn.Module):
         # Avoid numerical issues by limiting the mean of the Gaussian
         # to be in [-clip_mean, clip_mean]
         means = self.hard_tanh(means)
-
-        # if not self.tanh_squash:
-        # means = nn.tanh(means)
 
         if self.state_dependent_std:
             log_stds = self.log_std_layer(x)
@@ -412,22 +434,23 @@ class MetaPolicy(nn.Module):
         grad_masks = {}
         for i, layer in enumerate(self.backbones):
             if i == 0:
-                post_e = masks[layer.name]['embedding']
-                grad_masks[layer.name] = {
-                    'kernel': 1-jnp.broadcast_to(post_e, (input_dim, self.hidden_dims[i])),
-                    'bias': 1-post_e.flatten()}
-                pre_e = masks[layer.name]['embedding']
+                post_e = masks[layer.name]
+                kernel_e = jnp.broadcast_to(post_e, (input_dim, self.hidden_dims[i]))
+                grad_masks[(layer.name, 'kernel')] = 1 - kernel_e
+                grad_masks[(layer.name, 'bias')] = 1 - post_e.flatten()
+                pre_e = masks[layer.name]
             else:
-                post_e = masks[layer.name]['embedding']
+                post_e = masks[layer.name]
                 kernel_e = jnp.minimum(
                     jnp.broadcast_to(pre_e.reshape(-1, 1), (self.hidden_dims[i-1], self.hidden_dims[i])),
                     jnp.broadcast_to(post_e, (self.hidden_dims[i-1], self.hidden_dims[i]))
                 )
-                grad_masks[layer.name] = {'kernel': 1-kernel_e, 'bias': 1-post_e.flatten()}
-                pre_e = masks[layer.name]['embedding']
+                grad_masks[(layer.name, 'kernel')] = 1 - kernel_e
+                grad_masks[(layer.name, 'bias')] = 1 - post_e.flatten()
+                pre_e = masks[layer.name]
 
         kernel_e = jnp.broadcast_to(pre_e.reshape(-1, 1), (self.hidden_dims[-1], self.action_dim))
-        grad_masks[self.mean_layer.name] = {'kernel': 1-kernel_e}
+        grad_masks[(self.mean_layer.name, 'kernel')] = 1 - kernel_e
         
         return grad_masks
 
