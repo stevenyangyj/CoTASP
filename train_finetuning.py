@@ -18,16 +18,19 @@ from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', "cw2-ab-button-press", 'Environment name.')
-flags.DEFINE_string('save_dir', '', 'Tensorboard logging dir.')
+flags.DEFINE_string('env_name', "cw2-ab-reach", 'Environment name.')
+flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/CoTASP/logs', 'Tensorboard logging dir.')
 flags.DEFINE_integer('seed', 66, 'Random seed.')
 flags.DEFINE_string('base_algo', 'sac', 'base learning algorithm')
 
-flags.DEFINE_string('env_type', 'random_init_all', 'The type of env is either deterministic or random_init_all')
+flags.DEFINE_boolean('ablation', False, 'Ablation study')
+flags.DEFINE_boolean('save_checkpoint', False, 'Save meta-policy network parameters')
+
+flags.DEFINE_string('env_type', 'deterministic', 'The type of env is either deterministic or random_init_all')
 flags.DEFINE_boolean('normalize_reward', False, 'Normalize rewards')
 flags.DEFINE_integer('eval_episodes', 1, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
-flags.DEFINE_integer('eval_interval', 10000, 'Eval interval.')
+flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
 flags.DEFINE_integer('batch_size', 256, 'Mini batch size.')
 flags.DEFINE_integer('updates_per_step', 1, 'Gradient updates per step.')
 flags.DEFINE_integer('max_steps', int(1e6), 'Number of training steps for each task')
@@ -53,7 +56,11 @@ def main(_):
     kwargs = dict(FLAGS.config)
     algo = FLAGS.base_algo
     run_name = f"{FLAGS.env_name}__{algo}__{FLAGS.seed}__{int(time.time())}"
-    save_policy_dir = f"logs/saved_actors/{run_name}.json"
+
+    if FLAGS.save_checkpoint:
+        save_policy_dir = f"logs/saved_actors/{run_name}.json"
+    else:
+        save_policy_dir = None
 
     wandb.init(
         project=FLAGS.wandb_project_name,
@@ -92,7 +99,7 @@ def main(_):
     eval_envs = []
     for idx, dict_t in enumerate(seq_tasks):
         # only for ablation study
-        if idx == 0:
+        if idx == 0 and FLAGS.ablation:
             eval_seed = 60
         else:
             eval_seed = FLAGS.seed
@@ -107,7 +114,7 @@ def main(_):
         Learning subroutine for the current task
         '''
         # only for ablation study
-        if idx == 0:
+        if idx == 0 and FLAGS.ablation:
             expl_seed = 60
         else:
             expl_seed = FLAGS.seed
@@ -118,7 +125,7 @@ def main(_):
 
         # reset replay buffer
         replay_buffer = ReplayBuffer(env.observation_space, env.action_space,
-                                    FLAGS.buffer_size or FLAGS.max_steps)
+                                     FLAGS.buffer_size or FLAGS.max_steps)
 
         observation, done = env.reset(), False
         for i in tqdm.tqdm(range(1, FLAGS.max_steps + 1),

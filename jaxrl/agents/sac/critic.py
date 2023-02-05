@@ -5,10 +5,10 @@ import optax
 import jax.numpy as jnp
 
 from jaxrl.datasets import Batch
-from jaxrl.networks.common import InfoDict, Model, Params, PRNGKey
+from jaxrl.networks.common import InfoDict, TrainState, Params, PRNGKey
 
 
-def target_update(critic: Model, target_critic: Model, tau: float) -> Model:
+def target_update(critic: TrainState, target_critic: TrainState, tau: float) -> TrainState:
     # new_target_params = jax.tree_multimap(
     #     lambda p, tp: p * tau + tp * (1 - tau), critic.params,
     #     target_critic.params)
@@ -19,8 +19,8 @@ def target_update(critic: Model, target_critic: Model, tau: float) -> Model:
     return target_critic.replace(params=new_target_params)
 
 
-def update(key: PRNGKey, actor: Model, critic: Model, target_critic: Model,
-           temp: Model, batch: Batch, discount: float) -> Tuple[Model, InfoDict]:
+def update(key: PRNGKey, actor: TrainState, critic: TrainState, target_critic: TrainState,
+           temp: TrainState, batch: Batch, discount: float) -> Tuple[TrainState, InfoDict]:
 
     dist = actor(batch.next_observations)
     next_actions = dist.sample(seed=key)
@@ -40,6 +40,7 @@ def update(key: PRNGKey, actor: Model, critic: Model, target_critic: Model,
             'q2': q2.mean()
         }
 
-    new_critic, info = critic.apply_gradient(critic_loss_fn)
+    grads_critic, info = jax.grad(critic_loss_fn, has_aux=True)(critic.params)
+    new_critic = critic.apply_gradients(grads=grads_critic)
 
     return new_critic, info
