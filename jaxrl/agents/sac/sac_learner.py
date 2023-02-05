@@ -2,14 +2,12 @@
 
 from copy import deepcopy
 import functools
-from typing import Optional, Sequence, Tuple, Callable, Any
+from typing import Optional, Tuple, Callable, Any
 
 import jax
 import jax.numpy as jnp
-from jax.flatten_util import ravel_pytree
 import numpy as np
-import optax
-import wandb
+from jax.tree_util import tree_map
 from flax import linen as nn
 from flax.core import freeze, unfreeze, FrozenDict
 from sentence_transformers import SentenceTransformer
@@ -21,16 +19,17 @@ from jaxrl.agents.sac.critic import target_update
 from jaxrl.agents.sac.critic import update as update_critic
 from jaxrl.datasets import Batch
 from jaxrl.networks import critic_net, policies
-from jaxrl.networks.common import InfoDict, Model, PRNGKey, Params, \
-    AlterTrainableModel, global_norm, set_optimizer, tree_l1_mean
+from jaxrl.networks.common import InfoDict, TrainState, PRNGKey, Params, \
+    MPNTrainState
 from jaxrl.dict_learning.task_dict import OnlineDictLearnerV2
 
 
 @jax.jit
-def _update_jit(
-    rng: PRNGKey, actor: Model, critic: Model, target_critic: Model,
-    temp: Model, batch: Batch, discount: float, tau: float,
-    target_entropy: float) -> Tuple[PRNGKey, Model, Model, Model, Model, InfoDict]:
+def _update_sac_jit(
+    rng: PRNGKey, actor: TrainState, critic: TrainState, target_critic: TrainState,
+    temp: TrainState, batch: Batch, discount: float, tau: float,
+    target_entropy: float
+    ) -> Tuple[PRNGKey, TrainState, TrainState, TrainState, TrainState, InfoDict]:
 
     rng, key = jax.random.split(rng)
     new_critic, critic_info = update_critic(key,
@@ -71,7 +70,6 @@ class SACLearner(object):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
         """
-
         action_dim = actions.shape[-1]
 
         if target_entropy is None:
@@ -85,27 +83,38 @@ class SACLearner(object):
 
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
+
         actor_configs['action_dim'] = action_dim
         actor_def = policies.NormalTanhPolicy(**actor_configs)
-        actor = Model.create(actor_def,
-                             inputs=[actor_key, observations],
-                             tx=set_optimizer(**optim_configs))
+        _, actor_params = actor_def.init(actor_key, observations).pop('params')
+        actor = TrainState.create(
+            apply_fn=actor_def.apply,
+            params=actor_params,
+            tx=utils_fn.set_optimizer(**optim_configs)
+        )
 
         critic_def = critic_net.DoubleCritic(**critic_configs)
-        critic = Model.create(critic_def,
-                              inputs=[critic_key, observations, actions],
-                              tx=set_optimizer(**optim_configs))
-        target_critic = Model.create(
-            critic_def, inputs=[critic_key, observations, actions])
+        _, critic_params = critic_def.init(
+            critic_key, observations, actions
+        ).pop('params')
+        critic = TrainState.create(
+            apply_fn=critic_def.apply,
+            params=critic_params,
+            tx=utils_fn.set_optimizer(**optim_configs)
+        )
+
+        target_critic = deepcopy(critic)
 
         opt_kwargs_temp = deepcopy(optim_configs)
-        # optim_configs['lr'] = 1e-3
         opt_kwargs_temp['max_norm'] = -1.0
-        # optim_configs['optim_algo'] = 'sgd'
         opt_kwargs_temp['clip_method'] = None
-        temp = Model.create(temperature.Temperature(init_temperature),
-                            inputs=[temp_key],
-                            tx=set_optimizer(**opt_kwargs_temp))
+        temp_def = temperature.Temperature(init_temperature)
+        _, temp_params = temp_def.init(temp_key).pop('params')
+        temp = TrainState.create(
+            apply_fn=temp_def.apply,
+            params=temp_params,
+            tx=utils_fn.set_optimizer(**opt_kwargs_temp)
+        )
 
         self.actor = actor
         self.critic = critic
@@ -124,7 +133,7 @@ class SACLearner(object):
 
         self.invalid_filter = jax.jit(
             lambda x:
-            jax.tree_map(
+            tree_map(
                 lambda y: jnp.where(jnp.logical_or(jnp.isnan(y), jnp.isinf(y)), 0, y),
                 x
             )
@@ -144,7 +153,7 @@ class SACLearner(object):
     def update(self, batch: Batch) -> InfoDict:
         self.step += 1
 
-        new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_jit(
+        new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_sac_jit(
             self.rng, self.actor, self.critic, self.target_critic, self.temp,
             batch, self.discount, self.tau, self.target_entropy)
 
@@ -180,60 +189,60 @@ class SACLearner(object):
         self.critic = self.critic.reset_optimizer()
         self.temp = self.temp.reset_optimizer()
 
-        # save actor params
-        self.actor.save(save_actor_dir)
+        if save_actor_dir is not None:
+            # save actor params
+            self.actor.save(save_actor_dir)
 
 
-@functools.partial(jax.jit, static_argnames=('actor_apply_fn'))
+@jax.jit
 def _sample_actions(
         rng: PRNGKey,
-        actor_apply_fn: Callable[..., Any],
-        actor_params: Params,
+        actor: MPNTrainState,
         observations: np.ndarray,
         task_i: jnp.ndarray,
         temperature: float = 1.0) -> Tuple[PRNGKey, jnp.ndarray, dict]:
     rng, key = jax.random.split(rng)
-    dist, dicts = actor_apply_fn(
-        {'params': actor_params},
+    dist, dicts = actor(
         observations,
         task_i,
-        temperature)
+        temperature
+    )
 
     return rng, dist.sample(seed=key), dicts
 
 
-@functools.partial(jax.jit, static_argnames=('finetune', 'first_task'))
-def _update_cotasp_jit(
-    rng: PRNGKey, task_id: int, pms_mask: FrozenDict, cum_mask: FrozenDict, actor: AlterTrainableModel,
-    critic: Model, target_critic: Model, temp: Model, batch: Batch, discount: float, 
-    tau: float, target_entropy: float, finetune: bool, first_task: bool
-    ) -> Tuple[PRNGKey, AlterTrainableModel, Model, Model, Model, InfoDict]:
+def _update_alpha(
+    rng: PRNGKey, task_id: int, param_mask: FrozenDict[str, Any],
+    actor: MPNTrainState, critic: TrainState, temp: TrainState, 
+    batch: Batch) -> Tuple[PRNGKey, MPNTrainState, InfoDict]:
 
     rng, key = jax.random.split(rng)
     def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        dist, dicts = actor.apply_fn({'params': actor_params}, batch.observations, jnp.array([task_id]))
+        dist, dicts = actor.apply_fn(
+            {'params': actor_params}, batch.observations, jnp.array([task_id])
+        )
         actions = dist.sample(seed=key)
         log_probs = dist.log_prob(actions)
         q1, q2 = critic(batch.observations, actions)
         q = jnp.minimum(q1, q2)
         actor_loss = (log_probs * temp() - q).mean()
 
-        if finetune:
-            # masking regularization
-            reg = 0
-            count = 0
-            if first_task:
-                for m_k in dicts['masks']:
-                    reg += dicts['masks'][m_k]['embedding'].sum()
-                    count += dicts['masks'][m_k]['embedding'].size
-            else:
-                for m_k in dicts['masks']:
-                    aux = 1 - cum_mask[m_k]['embedding']
-                    reg += (dicts['masks'][m_k]['embedding'] * aux).sum()
-                    count += aux.sum()
-            regularizer = reg / count * jax.lax.stop_gradient(0.5 * jnp.sqrt(jnp.abs(q).mean()))
+        # if finetune:
+        #     # masking regularization
+        #     reg = 0
+        #     count = 0
+        #     if first_task:
+        #         for m_k in dicts['masks']:
+        #             reg += dicts['masks'][m_k]['embedding'].sum()
+        #             count += dicts['masks'][m_k]['embedding'].size
+        #     else:
+        #         for m_k in dicts['masks']:
+        #             aux = 1 - cumul_mask[m_k]['embedding']
+        #             reg += (dicts['masks'][m_k]['embedding'] * aux).sum()
+        #             count += aux.sum()
+        #     regularizer = reg / count * jax.lax.stop_gradient(0.5 * jnp.sqrt(jnp.abs(q).mean()))
 
-            actor_loss += regularizer
+        #     actor_loss += regularizer
 
         # Modified Differential Method of Multipliers
         # epi = -target_entropy
@@ -247,45 +256,92 @@ def _update_cotasp_jit(
             'means': dicts['means'].mean()
         }
         for k in dicts['masks']:
-            _info[k+'_rate_act'] = utils_fn.rate_activity(dicts['masks'][k])
+            _info[k+'_rate_act'] = jnp.mean(dicts['masks'][k])
 
         return actor_loss, _info
     
     # grads of actor
-    grads_actor, actor_info = jax.grad(actor_loss_fn,has_aux=True)(actor.params)
-    # recording grads norm
-    actor_info['g_norm_actor'] = global_norm(grads_actor)
+    grads_actor, actor_info = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
+    # recording info
+    actor_info['g_norm_actor'] = utils_fn.global_norm(grads_actor)
+    actor_info['used_capacity'] = 1.0 - utils_fn.rate_activity(param_mask)
 
-    if finetune:
-        # only update coefficients
-        new_actor = actor.apply_gradient_one(grads=grads_actor, has_aux=False)
-        if not first_task:
-            actor_info['used_capacity'] = 1.0 - tree_l1_mean(pms_mask)
-        else:
-            actor_info['used_capacity'] = 0.0
-    else:
-        # only update actor params and
-        # restrict layer gradients in backprop
-        if not first_task:
-            grads_actor = unfreeze(grads_actor)
-            for k in pms_mask.keys():
-                for sub_k in pms_mask[k].keys():
-                    grads_actor[k][sub_k] *= pms_mask[k][sub_k]
-            grads_actor = freeze(grads_actor)
-            actor_info['used_capacity'] = 1.0 - tree_l1_mean(pms_mask)
-        else:
-            actor_info['used_capacity'] = 0.0
-        new_actor = actor.apply_gradient_two(grads=grads_actor, has_aux=False)
+    # only update coefficients (alpha)
+    new_actor = actor.apply_grads_alpha(grads=grads_actor)
+
+    return rng, new_actor, actor_info
+
+def _update_theta(
+    rng: PRNGKey, task_id: int, param_mask: FrozenDict[str, Any], 
+    actor: MPNTrainState, critic: TrainState, temp: TrainState, 
+    batch: Batch) -> Tuple[PRNGKey, MPNTrainState, InfoDict]:
+
+    rng, key = jax.random.split(rng)
+    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
+        dist, dicts = actor.apply_fn(
+            {'params': actor_params}, batch.observations, jnp.array([task_id])
+        )
+        actions = dist.sample(seed=key)
+        log_probs = dist.log_prob(actions)
+        q1, q2 = critic(batch.observations, actions)
+        q = jnp.minimum(q1, q2)
+        actor_loss = (log_probs * temp() - q).mean()
+
+        _info = {
+            'hac_sac_loss': actor_loss,
+            'entropy': -log_probs.mean(),
+            'means': dicts['means'].mean()
+        }
+        for k in dicts['masks']:
+            _info[k+'_rate_act'] = jnp.mean(dicts['masks'][k])
+
+        return actor_loss, _info
+    
+    # grads of actor
+    grads_actor, actor_info = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
+    # recording info
+    actor_info['g_norm_actor'] = utils_fn.global_norm(grads_actor)
+    actor_info['used_capacity'] = 1.0 - utils_fn.rate_activity(param_mask)
+
+    # Maksing gradients according to cumulative binary masks
+    # grads_actor = unfreeze(grads_actor)
+    # for k in param_mask.keys():
+    #     for sub_k in param_mask[k].keys():
+    #         grads_actor[k][sub_k] *= param_mask[k][sub_k]
+    # grads_actor = freeze(grads_actor)
+    unfrozen_grads = unfreeze(grads_actor)
+    for path, value in param_mask.items():
+        cursor = unfrozen_grads
+        for key in path[:-1]:
+            if key in cursor:
+                cursor = cursor[key]
+        cursor[path[-1]] *= value
+    
+    new_actor = actor.apply_grads_theta(grads=freeze(unfrozen_grads))
+
+    return rng, new_actor, actor_info
+
+def _update_temp(
+    temp: TrainState, actor_entropy: float, target_entropy: float
+    ) -> Tuple[TrainState, InfoDict]:
 
     def temperature_loss_fn(temp_params: Params):
         temperature = temp.apply_fn({'params': temp_params})
-        temp_loss = temperature * (actor_info['entropy'] - target_entropy).mean()
+        temp_loss = temperature * (actor_entropy - target_entropy).mean()
         return temp_loss, {'temperature': temperature, 'temp_loss': temp_loss}
     
-    grads_temp, alpha_info = jax.grad(temperature_loss_fn, has_aux=True)(temp.params)
-    # recording grads norm
-    alpha_info['g_norm_temp'] = global_norm(grads_temp)
-    new_temp = temp.apply_gradient(grads=grads_temp, has_aux=False)
+    grads_temp, temp_info = jax.grad(temperature_loss_fn, has_aux=True)(temp.params)
+    # recording info
+    temp_info['g_norm_temp'] = utils_fn.global_norm(grads_temp)
+
+    new_temp = temp.apply_gradients(grads=grads_temp)
+
+    return new_temp, temp_info
+
+def _update_critic(
+    rng: PRNGKey, task_id: int, actor: MPNTrainState, critic: TrainState, 
+    target_critic: TrainState, temp: TrainState, batch: Batch, discount: float, 
+    tau: float) -> Tuple[PRNGKey, TrainState, TrainState, InfoDict]:
     
     rng, key = jax.random.split(rng)
     dist, _ = actor(batch.next_observations, jnp.array([task_id]))
@@ -306,15 +362,43 @@ def _update_cotasp_jit(
             'q2': q2.mean()}
     
     grads_critic, critic_info = jax.grad(critic_loss_fn, has_aux=True)(critic.params)
-    # recording grads norm
-    critic_info['g_norm_critic'] = global_norm(grads_critic)
-    new_critic = critic.apply_gradient(grads=grads_critic, has_aux=False)
+    # recording info
+    critic_info['g_norm_critic'] = utils_fn.global_norm(grads_critic)
+
+    new_critic = critic.apply_gradients(grads=grads_critic)
     new_target_critic = target_update(new_critic, target_critic, tau)
 
-    return rng, new_actor, new_critic, new_target_critic, new_temp, {
-        **critic_info,
+    return rng, new_critic, new_target_critic, critic_info
+
+
+@jax.jit
+def _update_cotasp_jit(rng: PRNGKey, task_id: int, tau: float, discount: float, 
+    target_entropy: float, optimize_alpha: bool, param_mask: FrozenDict[str, Any], 
+    actor: MPNTrainState, critic: TrainState, target_critic: TrainState, 
+    temp: TrainState, batch: Batch
+    ) -> Tuple[PRNGKey, MPNTrainState, TrainState, TrainState, TrainState, InfoDict]:
+    # optimizing either alpha or theta
+    new_rng, new_actor, actor_info = jax.lax.cond(
+        optimize_alpha,
+        _update_alpha,
+        _update_theta,
+        rng, task_id, param_mask, actor, critic, temp, batch
+    )
+
+    # updating temperature coefficient
+    new_temp, temp_info = _update_temp(
+        temp, actor_info['entropy'], target_entropy
+    )
+
+    # optimizing critics
+    new_rng, new_critic, new_target_critic, critic_info = _update_critic(
+        new_rng, task_id, actor, critic, target_critic, temp, batch, discount, tau
+    )
+    return new_rng, new_actor, new_temp, new_critic, new_target_critic, {
         **actor_info,
-        **alpha_info}
+        **temp_info,
+        **critic_info
+    }
 
 
 class CoTASPLearner(SACLearner):
@@ -323,7 +407,7 @@ class CoTASPLearner(SACLearner):
         seed: int,
         observations: jnp.ndarray,
         actions: jnp.ndarray,
-        task_n: int,
+        task_num: int,
         load_policy_dir: Optional[str] = None,
         load_dict_dir: Optional[str] = None,
         update_dict = True,
@@ -344,16 +428,14 @@ class CoTASPLearner(SACLearner):
         action_dim = actions.shape[-1]
 
         self.rng, actor_key = jax.random.split(self.rng, 2)
-        actor_configs['task_num'] = task_n
+        actor_configs['task_num'] = task_num
         actor_configs['action_dim'] = action_dim
         actor_def = policies.MetaPolicy(**actor_configs)
-        actor = AlterTrainableModel.create(
-            model_def=actor_def,
-            inputs=[actor_key, observations, jnp.array([0])],
-            params_list_one=['embeds'],
-            params_list_two=['backbones', 'mean', 'log'],
-            optimizer_one=set_optimizer(**optim_configs),
-            optimizer_two=set_optimizer(**optim_configs)
+        _, actor_params = actor_def.init(actor_key, observations, jnp.array([0])).pop('params')
+        actor = MPNTrainState.create(
+            apply_fn=actor_def.apply,
+            params=actor_params,
+            tx=utils_fn.set_optimizer(**optim_configs)
         )
 
         if load_policy_dir is not None:
@@ -369,11 +451,9 @@ class CoTASPLearner(SACLearner):
         self.dict4layers = {}
         for id_layer, hidn in enumerate(actor_configs['hidden_dims']):
             dict_learner = OnlineDictLearnerV2(
-                n_features=384,
-                n_components=hidn,
-                seed=seed + id_layer + 1,
-                positive_code=True,
-                verbose=True,
+                384,
+                hidn,
+                seed+id_layer+1,
                 **dict_configs)
             self.dict4layers[f'embeds_bb_{id_layer}'] = dict_learner
         
@@ -381,13 +461,18 @@ class CoTASPLearner(SACLearner):
             for k in self.dict4layers.keys():
                 self.dict4layers[k].load(f'{load_dict_dir}/{k}.pkl')
 
-        # self.masks = {}
-        # self.target_masks = {}
 
+        # initialize param_masks
+        self.rng, _, dicts = _sample_actions(
+            self.rng, actor, self.dummy_o, jnp.array([0])
+        )
+        self.cumul_masks = tree_map(lambda x: jnp.zeros_like(x), dicts['masks'])
+        self.param_masks = freeze(
+            get_grad_masks_jit({'params': actor.params}, self.cumul_masks)
+        )
+
+        # initialize other things
         self.actor = actor
-        self.mask_cum = None
-        self.mask_prm = None
-        self.fir_task = True
         self.update_dict = update_dict
         self.update_coef = update_coef
         self.actor_cfgs = actor_configs
@@ -396,78 +481,69 @@ class CoTASPLearner(SACLearner):
         self.task_encoder = SentenceTransformer('all-MiniLM-L12-v2')
 
     def start_task(self, task_id: int, description: str):
-        task_e = self.task_encoder.encode(description)[np.newaxis]
+        task_e = self.task_encoder.encode(description)[np.newaxis, :]
         self.task_embeddings.append(task_e)
 
-        # set init gates for each layer of actor
+        # set initial alpha for each layer of MPN
         actor_params = unfreeze(self.actor.params)
         for k in self.actor.params.keys():
             if k.startswith('embeds'):
-                gates = self.dict4layers[k].get_gates(task_e)
-                gates = jnp.asarray(gates.flatten())
-                # Replace the i-th coefficients
-                actor_params[k]['embedding'] = actor_params[k]['embedding'].at[task_id].set(gates.flatten())
-        new_actor = self.actor.replace(params=freeze(actor_params))
-        self.actor = new_actor
+                alpha_l = self.dict4layers[k].get_alpha(task_e)
+                alpha_l = jnp.asarray(alpha_l.flatten())
+                # Replace the i-th row
+                actor_params[k]['embedding'] = actor_params[k]['embedding'].at[task_id].set(alpha_l)
+        self.actor = self.actor.update_params(freeze(actor_params))
 
     def sample_actions(self,
                        observations: np.ndarray,
                        task_id: int,
                        temperature: float = 1.0) -> jnp.ndarray:
 
-        rng, actions, _ = _sample_actions(self.rng, self.actor.apply_fn,
-                                          self.actor.params, observations, 
+        rng, actions, _ = _sample_actions(self.rng, self.actor, observations, 
                                           jnp.array([task_id]), temperature)
         self.rng = rng
-
         actions = self.invalid_filter(actions)
+
         return actions
 
-    def update(self, task_id: int, batch: Batch, mask_finetune: bool=False) -> InfoDict:
+    def update(self, task_id: int, batch: Batch, optimize_alpha: bool=False) -> InfoDict:
 
         if not self.update_coef:
-            mask_finetune = False
+            optimize_alpha = False
 
-        new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_cotasp_jit(
-            rng=self.rng, task_id=task_id, pms_mask=self.mask_prm, cum_mask=self.mask_cum,
-            actor=self.actor, critic=self.critic, target_critic=self.target_critic, 
-            temp=self.temp, batch=batch, discount=self.discount, tau=self.tau, target_entropy=self.target_entropy, 
-            finetune=mask_finetune, first_task=self.fir_task)
+        new_rng, new_actor, new_temp, new_critic, new_target_critic, info = _update_cotasp_jit(
+            self.rng, task_id, self.tau, self.discount, self.target_entropy, optimize_alpha, 
+            self.param_masks, self.actor, self.critic, self.target_critic, self.temp, batch
+        )
 
         self.step += 1
         self.rng = new_rng
         self.actor = new_actor
+        self.temp = new_temp  
         self.critic = new_critic
-        self.target_critic = new_target_critic
-        self.temp = new_temp     
+        self.target_critic = new_target_critic   
 
         return info
 
     def end_task(self, task_id: int, save_actor_dir: str, save_dict_dir: str):
         self.step = 0
 
-        self.rng, _, dicts = _sample_actions(self.rng, self.actor.apply_fn,
-                                             self.actor.params, self.dummy_o, 
-                                             jnp.array([task_id]))
-        mask_now = dicts['masks']
+        self.rng, _, dicts = _sample_actions(
+            self.rng, self.actor, self.dummy_o, jnp.array([task_id])
+        )
+        current_masks = dicts['masks']
+
         # cumulative attention from all the previous tasks
-        if self.fir_task:
-            self.mask_cum = deepcopy(mask_now)
-        else:
-            self.mask_cum = unfreeze(self.mask_cum)
-            for k in self.mask_cum.keys():
-                self.mask_cum[k]['embedding'] = jnp.maximum(
-                    self.mask_cum[k]['embedding'], 
-                    mask_now[k]['embedding'])
-        self.mask_cum = freeze(self.mask_cum)
+        self.cumul_masks = tree_map(
+            lambda a, b: jnp.maximum(a, b), self.cumul_masks, current_masks
+        )
 
         # To condition the training of task t + 1, we compute 
-        # the gradient masks according to cumulative attention weights
+        # the gradient masks according to cumulative binary masks
         grad_masks = self.get_grad_masks(
-            {'params': self.actor.params}, self.mask_cum)
-        grad_masks = jax.tree_util.tree_map(
-            lambda x: jnp.where(x < 1.0, 0, 1.0), grad_masks)
-        self.mask_prm = freeze(grad_masks)
+            {'params': self.actor.params}, self.cumul_masks
+        )
+        self.param_masks = freeze(grad_masks)
 
         # reset params for critic ,target_critic and temperature
         self.rng, key_critic, key_temp, key_actor = jax.random.split(self.rng, 4)
@@ -486,43 +562,43 @@ class CoTASPLearner(SACLearner):
             {'init_log_temp': self.init_temp},
             [key_temp])
 
-        # reset unused params for actor
-        new_params = utils_fn.reset_part_params(
+        # reset unused params for meta-policy network
+        new_rng, new_params = utils_fn.reset_free_params(
             self.actor.params,
-            self.mask_prm,
+            self.param_masks,
             policies.MetaPolicy,
             self.actor_cfgs,
             [key_actor, self.dummy_o, jnp.array([0])],
-            independent=False)
-        self.actor = self.actor.update_params(new_params)
-
+            adaptive_init=True
+        )
         # reset log_std_layer params
-        new_params_actor = utils_fn.reset_logstd_layer(
-            key_actor,
-            self.actor.params,
+        self.rng, new_params = utils_fn.reset_logstd_layer(
+            new_rng,
+            new_params,
             self.actor_cfgs['final_fc_init_scale'],
-            self.actor_cfgs['state_dependent_std'])
-        self.actor.update_params(new_params_actor)
+            self.actor_cfgs['state_dependent_std']
+        )
+        self.actor = self.actor.update_params(new_params)
 
         # update dictionary learners
         dict_stats = {}
         if self.update_dict:
             for k in self.actor.params.keys():
                 if k.startswith('embeds'):
-                    optimal_gates = self.actor.params[k]['embedding'][task_id]
-                    optimal_gates = np.array([optimal_gates.flatten()])
+                    optimal_alpha_l = self.actor.params[k]['embedding'][task_id]
+                    optimal_alpha_l = np.array([optimal_alpha_l.flatten()])
                     task_e = self.task_embeddings[task_id]
                     # online update dictionary via CD
-                    self.dict4layers[k].update_dict(optimal_gates, task_e)
+                    self.dict4layers[k].update_dict(optimal_alpha_l, task_e)
                     dict_stats[k] = {
-                        'sim_mat': self.dict4layers[k]._compute_corr_matrix(pre=False),
+                        'sim_mat': self.dict4layers[k]._compute_overlapping(),
                         'change_of_d': np.array(self.dict4layers[k].change_of_dict)
                     }
         else:
             for k in self.actor.params.keys():
                 if k.startswith('embeds'):
                     dict_stats[k] = {
-                        'sim_mat': self.dict4layers[k]._compute_corr_matrix(pre=True),
+                        'sim_mat': self.dict4layers[k]._compute_overlapping(),
                         'change_of_d': 0
                     }
 
@@ -531,40 +607,26 @@ class CoTASPLearner(SACLearner):
         self.critic = self.critic.reset_optimizer()
         self.temp = self.temp.reset_optimizer()
 
-        if self.fir_task:
-            self.fir_task = not self.fir_task  # trigger for the next task
-
-        # save actor params
-        self.actor.save(save_actor_dir)
-        # save dicts
-        for k in self.dict4layers.keys():
-            self.dict4layers[k].save(f'{save_dict_dir}/{k}.pkl')
+        if save_actor_dir is not None and save_dict_dir is not None:
+            # save actor params
+            self.actor.save(save_actor_dir)
+            # save dicts
+            for k in self.dict4layers.keys():
+                self.dict4layers[k].save(f'{save_dict_dir}/{k}.pkl')
 
         return dict_stats
 
     def freeze_task_params(self, task_id):
-        self.rng, _, dicts = _sample_actions(self.rng, self.actor.apply_fn,
-                                             self.actor.params, self.dummy_o, 
-                                             jnp.array([task_id]))
-        mask_now = dicts['masks']
+        self.rng, _, dicts = _sample_actions(self.rng, self.actor, 
+                                             self.dummy_o, jnp.array([task_id]))
+        current_masks = dicts['masks']
         # cumulative attention from all the previous tasks
-        if self.mask_cum is None:
-            self.mask_cum = deepcopy(mask_now)
-        else:
-            self.mask_cum = unfreeze(self.mask_cum)
-            for k in self.mask_cum.keys():
-                self.mask_cum[k]['embedding'] = jnp.maximum(
-                    self.mask_cum[k]['embedding'], 
-                    mask_now[k]['embedding'])
-        self.mask_cum = freeze(self.mask_cum)
+        self.cumul_masks = tree_map(
+            lambda a, b: jnp.maximum(a, b), self.cumul_masks, current_masks
+        )
 
         # To condition the training of task t + 1, we compute 
-        # the gradient masks according to cumulative attention weights
+        # the gradient masks according to cumulative binary masks
         grad_masks = self.get_grad_masks(
-            {'params': self.actor.params}, self.mask_cum)
-        grad_masks = jax.tree_util.tree_map(
-            lambda x: jnp.where(x < 1.0, 0, 1.0), grad_masks)
-        self.mask_prm = freeze(grad_masks)
-
-        if self.fir_task:
-            self.fir_task = not self.fir_task  # trigger for the next task
+            {'params': self.actor.params}, self.cumul_masks)
+        self.param_masks = freeze(grad_masks)

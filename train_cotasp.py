@@ -21,22 +21,25 @@ from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'cw2-ab-button-press', 'Environment name.')
-flags.DEFINE_string('save_dir', '', 'Logging dir.')
+flags.DEFINE_string('env_name', 'cw2-test', 'Environment name.')
+flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/CoTASP/logs', 'Logging dir.')
 flags.DEFINE_integer('seed', 60, 'Random seed.')
 flags.DEFINE_string('base_algo', 'cotasp', 'base learning algorithm')
 
-flags.DEFINE_string('env_type', 'random_init_all', 'The type of env is either deterministic or random_init_all')
+flags.DEFINE_boolean('ablation', False, 'Ablation study')
+flags.DEFINE_boolean('save_checkpoint', False, 'Save meta-policy network parameters')
+
+flags.DEFINE_string('env_type', 'deterministic', 'The type of env is either deterministic or random_init_all')
 flags.DEFINE_boolean('normalize_reward', False, 'Normalize rewards')
 flags.DEFINE_integer('eval_episodes', 1, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
-flags.DEFINE_integer('eval_interval', 10000, 'Eval interval.')
+flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
 flags.DEFINE_integer('batch_size', 256, 'Mini batch size.')
 flags.DEFINE_integer('updates_per_step', 1, 'Gradient updates per step.')
 flags.DEFINE_integer('max_step', int(1e6), 'Number of training steps for each task')
 flags.DEFINE_integer('start_training', int(1e4), 'Number of training steps to start training.')
-flags.DEFINE_integer('theta_step', int(2e5), 'Number of training steps for params (theta)')
-flags.DEFINE_integer('alpha_step', int(5e4), 'Number of finetune steps for mask (alpha).')
+flags.DEFINE_integer('theta_step', int(90), 'Number of training steps for theta.')
+flags.DEFINE_integer('alpha_step', int(10), 'Number of finetune steps for alpha.')
 
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 
@@ -48,7 +51,8 @@ config_flags.DEFINE_config_file(
     'config',
     'configs/sac_cotasp.py',
     'File path to the training hyperparameter configuration.',
-    lock_config=False)
+    lock_config=False
+)
 
 
 def main(_):
@@ -58,8 +62,13 @@ def main(_):
     algo_kwargs = dict(FLAGS.config)
     algo = FLAGS.base_algo
     run_name = f"{FLAGS.env_name}__{algo}__{FLAGS.seed}__{int(time.time())}"
-    save_policy_dir = f"logs/saved_actors/{run_name}.json"
-    save_dict_dir = f"logs/saved_dicts/{run_name}"
+
+    if FLAGS.save_checkpoint:
+        save_policy_dir = f"logs/saved_actors/{run_name}.json"
+        save_dict_dir = f"logs/saved_dicts/{run_name}"
+    else:
+        save_policy_dir = None
+        save_dict_dir = None
 
     wandb.init(
         project=FLAGS.wandb_project_name,
@@ -89,9 +98,7 @@ def main(_):
             FLAGS.seed,
             temp_env.observation_space.sample()[np.newaxis],
             temp_env.action_space.sample()[np.newaxis], 
-            10,
-            "",
-            "",
+            len(seq_tasks),
             **algo_kwargs)
         del temp_env
     else:
@@ -99,40 +106,42 @@ def main(_):
 
     # continual learning loop
     eval_envs = []
-    for idx, dict_t in enumerate(seq_tasks):
+    for idx, dict_task in enumerate(seq_tasks):
         # only for ablation study
-        if idx == 0:
+        if idx == 0 and FLAGS.ablation:
             eval_seed = 56
         else:
             eval_seed = FLAGS.seed
-        eval_envs.append(get_single_env(dict_t['task'], eval_seed, randomization=FLAGS.env_type))
+        eval_envs.append(get_single_env(dict_task['task'], eval_seed, randomization=FLAGS.env_type))
 
     total_env_steps = 0
-    for task_idx, dict_t in enumerate(seq_tasks):
+    for task_idx, dict_task in enumerate(seq_tasks):
 
         # only for ablation study
-        if task_idx == 0:
+        if task_idx == 0 and FLAGS.ablation:
             agent.freeze_task_params(task_idx)
         else:
-            print(f'Learning on task {task_idx+1}: {dict_t["task"]} for {FLAGS.max_step} steps')
+            print(f'Learning on task {task_idx+1}: {dict_task["task"]} for {FLAGS.max_step} steps')
 
             '''
             Learning subroutine for the current task
             '''
             # start the current task
-            agent.start_task(task_idx, dict_t["hint"])
+            agent.start_task(task_idx, dict_task["hint"])
 
             # set continual world environment
             env = get_single_env(
-                dict_t['task'], FLAGS.seed, randomization=FLAGS.env_type, 
-                normalize_reward=FLAGS.normalize_reward)
+                dict_task['task'], FLAGS.seed, randomization=FLAGS.env_type, 
+                normalize_reward=FLAGS.normalize_reward
+            )
 
             # reset replay buffer
-            replay_buffer = ReplayBuffer(env.observation_space, env.action_space,
-                                        FLAGS.buffer_size or FLAGS.max_step)
+            replay_buffer = ReplayBuffer(
+                env.observation_space, env.action_space, FLAGS.buffer_size or FLAGS.max_step
+            )
 
             observation, done = env.reset(), False
-            for idx, mask_finetune in enumerate(
+            for idx, optimize_alpha in enumerate(
                 itertools.islice(
                     itertools.cycle([False]*FLAGS.theta_step + [True]*FLAGS.alpha_step), FLAGS.max_step
                 )
@@ -173,7 +182,7 @@ def main(_):
                 if (i >= FLAGS.start_training) and (i % FLAGS.updates_per_step == 0):
                     for _ in range(FLAGS.updates_per_step):
                         batch = replay_buffer.sample(FLAGS.batch_size)
-                        update_info = agent.update(task_idx, batch, mask_finetune)
+                        update_info = agent.update(task_idx, batch, optimize_alpha)
                     if i % FLAGS.log_interval == 0:
                         for k, v in update_info.items():
                             wandb.log({f'training/{k}': v, 'global_steps': total_env_steps})
@@ -195,7 +204,7 @@ def main(_):
             Updating miscellaneous things
             '''
             print('End the current task')
-            dict_stats = agent.end_task(task_idx-1, save_policy_dir, save_dict_dir)
+            dict_stats = agent.end_task(task_idx, save_policy_dir, save_dict_dir)
 
     # save log data
     log.save()
