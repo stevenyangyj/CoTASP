@@ -377,12 +377,17 @@ def _update_cotasp_jit(rng: PRNGKey, task_id: int, tau: float, discount: float,
     actor: MPNTrainState, critic: TrainState, target_critic: TrainState, 
     temp: TrainState, batch: Batch
     ) -> Tuple[PRNGKey, MPNTrainState, TrainState, TrainState, TrainState, InfoDict]:
+    # optimizing critics
+    new_rng, new_critic, new_target_critic, critic_info = _update_critic(
+        rng, task_id, actor, critic, target_critic, temp, batch, discount, tau
+    )
+
     # optimizing either alpha or theta
     new_rng, new_actor, actor_info = jax.lax.cond(
         optimize_alpha,
         _update_alpha,
         _update_theta,
-        rng, task_id, param_mask, actor, critic, temp, batch
+        new_rng, task_id, param_mask, actor, new_critic, temp, batch
     )
 
     # updating temperature coefficient
@@ -390,10 +395,6 @@ def _update_cotasp_jit(rng: PRNGKey, task_id: int, tau: float, discount: float,
         temp, actor_info['entropy'], target_entropy
     )
 
-    # optimizing critics
-    new_rng, new_critic, new_target_critic, critic_info = _update_critic(
-        new_rng, task_id, actor, critic, target_critic, temp, batch, discount, tau
-    )
     return new_rng, new_actor, new_temp, new_critic, new_target_critic, {
         **actor_info,
         **temp_info,
@@ -460,7 +461,6 @@ class CoTASPLearner(SACLearner):
         if load_dict_dir is not None:
             for k in self.dict4layers.keys():
                 self.dict4layers[k].load(f'{load_dict_dir}/{k}.pkl')
-
 
         # initialize param_masks
         self.rng, _, dicts = _sample_actions(
@@ -545,7 +545,7 @@ class CoTASPLearner(SACLearner):
         )
         self.param_masks = freeze(grad_masks)
 
-        # reset params for critic ,target_critic and temperature
+        # re-initialize params of critic ,target_critic and temperature
         self.rng, key_critic, key_temp, key_actor = jax.random.split(self.rng, 4)
 
         self.critic = utils_fn.reset_model(
@@ -562,7 +562,7 @@ class CoTASPLearner(SACLearner):
             {'init_log_temp': self.init_temp},
             [key_temp])
 
-        # reset unused params for meta-policy network
+        # re-initialize unused params of meta-policy network
         new_rng, new_params = utils_fn.reset_free_params(
             self.actor.params,
             self.param_masks,
@@ -571,7 +571,7 @@ class CoTASPLearner(SACLearner):
             [key_actor, self.dummy_o, jnp.array([0])],
             adaptive_init=True
         )
-        # reset log_std_layer params
+        # re-initialize log_std_layer's params
         self.rng, new_params = utils_fn.reset_logstd_layer(
             new_rng,
             new_params,
