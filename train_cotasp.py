@@ -7,7 +7,6 @@ import random
 import time
 
 import numpy as np
-import tqdm
 import wandb
 from absl import app, flags
 from ml_collections import config_flags
@@ -44,7 +43,7 @@ flags.DEFINE_integer('alpha_step', int(10), 'Number of finetune steps for alpha.
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 
 flags.DEFINE_boolean('tqdm', False, 'Use tqdm progress bar.')
-flags.DEFINE_string('wandb_mode', 'online', 'Track experiments with Weights and Biases.')
+flags.DEFINE_string('wandb_mode', 'disabled', 'Track experiments with Weights and Biases.')
 flags.DEFINE_string('wandb_project_name', "jaxrl_cotasp", "The wandb's project name.")
 flags.DEFINE_string('wandb_entity', None, "the entity (team) of wandb's project")
 config_flags.DEFINE_config_file(
