@@ -10,6 +10,9 @@ __pycache__/
 logs/
 *.pdf
 
+# Ignore all files in the 'configs' subfolder.
+configs/
+
 # Distribution / packaging
 .Python
 build/
