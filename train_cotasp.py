@@ -8,8 +8,9 @@ import time
 
 import numpy as np
 import wandb
+import yaml
 from absl import app, flags
-from ml_collections import config_flags
+from ml_collections import config_flags, ConfigDict
 
 from jaxrl.datasets import ReplayBuffer
 from jaxrl.evaluation import evaluate_cl
@@ -20,7 +21,7 @@ from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'cw2-test', 'Environment name.')
+flags.DEFINE_string('env_name', 'cw10', 'Environment name.')
 flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/CoTASP/logs', 'Logging dir.')
 flags.DEFINE_integer('seed', 60, 'Random seed.')
 flags.DEFINE_string('base_algo', 'cotasp', 'base learning algorithm')
@@ -43,13 +44,17 @@ flags.DEFINE_integer('alpha_step', int(10), 'Number of finetune steps for alpha.
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 
 flags.DEFINE_boolean('tqdm', False, 'Use tqdm progress bar.')
-flags.DEFINE_string('wandb_mode', 'disabled', 'Track experiments with Weights and Biases.')
+flags.DEFINE_string('wandb_mode', 'online', 'Track experiments with Weights and Biases.')
 flags.DEFINE_string('wandb_project_name', "jaxrl_cotasp", "The wandb's project name.")
 flags.DEFINE_string('wandb_entity', None, "the entity (team) of wandb's project")
-config_flags.DEFINE_config_file(
+
+# YAML file path to cotasp's hyperparameter configuration
+with open('configs/sac_cotasp.yaml', 'r') as file:
+    yaml_dict = yaml.unsafe_load(file)
+config_flags.DEFINE_config_dict(
     'config',
-    'configs/sac_cotasp.py',
-    'File path to the training hyperparameter configuration.',
+    ConfigDict(yaml_dict),
+    'Training hyperparameter configuration.',
     lock_config=False
 )
 
@@ -57,7 +62,6 @@ config_flags.DEFINE_config_file(
 def main(_):
     # config tasks
     seq_tasks = TASK_SEQS[FLAGS.env_name]
-
     algo_kwargs = dict(FLAGS.config)
     algo = FLAGS.base_algo
     run_name = f"{FLAGS.env_name}__{algo}__{FLAGS.seed}__{int(time.time())}"
