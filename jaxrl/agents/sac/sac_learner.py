@@ -304,11 +304,6 @@ def _update_theta(
     actor_info['used_capacity'] = 1.0 - utils_fn.rate_activity(param_mask)
 
     # Maksing gradients according to cumulative binary masks
-    # grads_actor = unfreeze(grads_actor)
-    # for k in param_mask.keys():
-    #     for sub_k in param_mask[k].keys():
-    #         grads_actor[k][sub_k] *= param_mask[k][sub_k]
-    # grads_actor = freeze(grads_actor)
     unfrozen_grads = unfreeze(grads_actor)
     for path, value in param_mask.items():
         cursor = unfrozen_grads

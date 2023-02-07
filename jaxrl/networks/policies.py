@@ -119,13 +119,11 @@ class NormalTanhPolicy(nn.Module):
     @nn.compact
     def __call__(self,
                  observations: jnp.ndarray,
-                 temperature: float = 1.0,
-                 training: bool = False) -> tfd.Distribution:
+                 temperature: float = 1.0) -> tfd.Distribution:
         outputs = MLP(self.hidden_dims,
                       activations=activation_fn(self.name_activation),
                       activate_final=True,
-                      use_layer_norm=self.use_layer_norm)(observations,
-                                                      training=training)
+                      use_layer_norm=self.use_layer_norm)(observations)
 
         means = nn.Dense(self.action_dim,
                          kernel_init=default_init(
@@ -394,11 +392,15 @@ class MetaPolicy(nn.Module):
             x = layer(x)
             # straight-through estimator
             phi_l = ste_step_fn(self.embeds_bb[i](t))
-            masks[layer.name] = phi_l
-            x = self.activation(x)
-            x = x * jnp.broadcast_to(phi_l, x.shape)
+            # masking outputs
+            x *= jnp.broadcast_to(phi_l, x.shape)
+            # normalization
             if i == 0 and (self.use_layer_norm or self.use_rms_norm):
                 x = self.normalizer(x)
+                x = nn.tanh(x)
+            else:
+                x = self.activation(x)
+            masks[layer.name] = phi_l
         
         means = self.mean_layer(x)
 
@@ -434,22 +436,17 @@ class MetaPolicy(nn.Module):
         grad_masks = {}
         for i, layer in enumerate(self.backbones):
             if i == 0:
-                post_e = masks[layer.name]
-                kernel_e = jnp.broadcast_to(post_e, (input_dim, self.hidden_dims[i]))
+                post_m = masks[layer.name]
+                kernel_e = jnp.broadcast_to(post_m, (input_dim, self.hidden_dims[i]))
                 grad_masks[(layer.name, 'kernel')] = 1 - kernel_e
-                grad_masks[(layer.name, 'bias')] = 1 - post_e.flatten()
-                pre_e = masks[layer.name]
+                grad_masks[(layer.name, 'bias')] = 1 - post_m.flatten()
             else:
-                post_e = masks[layer.name]
-                kernel_e = jnp.minimum(
-                    jnp.broadcast_to(pre_e.reshape(-1, 1), (self.hidden_dims[i-1], self.hidden_dims[i])),
-                    jnp.broadcast_to(post_e, (self.hidden_dims[i-1], self.hidden_dims[i]))
-                )
+                post_m = masks[layer.name]
+                kernel_e = jnp.broadcast_to(post_m, (self.hidden_dims[i-1], self.hidden_dims[i]))
                 grad_masks[(layer.name, 'kernel')] = 1 - kernel_e
-                grad_masks[(layer.name, 'bias')] = 1 - post_e.flatten()
-                pre_e = masks[layer.name]
+                grad_masks[(layer.name, 'bias')] = 1 - post_m.flatten()
 
-        kernel_e = jnp.broadcast_to(pre_e.reshape(-1, 1), (self.hidden_dims[-1], self.action_dim))
+        kernel_e = jnp.broadcast_to(post_m.reshape(-1, 1), (self.hidden_dims[-1], self.action_dim))
         grad_masks[(self.mean_layer.name, 'kernel')] = 1 - kernel_e
         
         return grad_masks

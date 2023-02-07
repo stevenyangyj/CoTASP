@@ -124,8 +124,6 @@ def tree_l1_mean(updates: Params) -> jnp.array:
 def rate_activity(updates: Params) -> jnp.array:
     sums = 0
     count = 0
-    # updates = jax.tree_util.tree_map(
-    #     lambda x: jnp.heaviside(x, 0), updates)
     for x in jax.tree_util.tree_leaves(updates):
         count += x.size
         sums += x.sum()
@@ -205,14 +203,6 @@ def reset_free_params(
             new_params[k][sub_k] = new_params[k][sub_k] * (1.0 - param_masks[(k, sub_k)]) \
                 + init_params[k][sub_k] * param_masks[(k, sub_k)]
 
-    # print('masks', structured_masks)
-    # print('init', init_params)
-    # print('params', params)
-
-    # result = tree_map(
-    #     lambda x, y, w: x * w + y * (1.0 - w), 
-    #     init_params, unfreeze(params), structured_masks
-    # )
     return rng, freeze(new_params)
 
 
@@ -315,11 +305,10 @@ class MLP(nn.Module):
     hidden_dims: Sequence[int]
     activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
     activate_final: bool = False
-    dropout_rate: Optional[float] = None
     use_layer_norm: bool = True
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray, training: bool = False) -> jnp.ndarray:
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         for i, size in enumerate(self.hidden_dims):
             x = nn.Dense(size, kernel_init=default_init())(x)
             # whether using layer normalization
@@ -329,9 +318,6 @@ class MLP(nn.Module):
             else:
                 if i + 1 < len(self.hidden_dims) or self.activate_final:
                     x = self.activations(x)
-                    if self.dropout_rate is not None:
-                        x = nn.Dropout(rate=self.dropout_rate)(
-                            x, deterministic=not training)
         return x
 
 

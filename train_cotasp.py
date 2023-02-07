@@ -21,7 +21,7 @@ from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', 'cw10', 'Environment name.')
+flags.DEFINE_string('env_name', 'cw2-test', 'Environment name.')
 flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/CoTASP/logs', 'Logging dir.')
 flags.DEFINE_integer('seed', 60, 'Random seed.')
 flags.DEFINE_string('base_algo', 'cotasp', 'base learning algorithm')
