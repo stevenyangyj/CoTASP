@@ -8,9 +8,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.tree_util import tree_map
+from jax.flatten_util import ravel_pytree
 from flax import linen as nn
 from flax.core import freeze, unfreeze, FrozenDict
 from sentence_transformers import SentenceTransformer
+from sklearn.decomposition import sparse_encode
 
 import jaxrl.networks.common as utils_fn
 from jaxrl.agents.sac import temperature
@@ -450,6 +452,7 @@ class CoTASPLearner(SACLearner):
                 384,
                 hidn,
                 seed+id_layer+1,
+                None, # whether using svd dictionary initialization
                 **dict_configs)
             self.dict4layers[f'embeds_bb_{id_layer}'] = dict_learner
         
@@ -520,26 +523,7 @@ class CoTASPLearner(SACLearner):
 
         return info
 
-    def end_task(self, task_id: int, save_actor_dir: str, save_dict_dir: str):
-        self.step = 0
-
-        self.rng, _, dicts = _sample_actions(
-            self.rng, self.actor, self.dummy_o, jnp.array([task_id])
-        )
-        current_masks = dicts['masks']
-
-        # cumulative attention from all the previous tasks
-        self.cumul_masks = tree_map(
-            lambda a, b: jnp.maximum(a, b), self.cumul_masks, current_masks
-        )
-
-        # To condition the training of task t + 1, we compute 
-        # the gradient masks according to cumulative binary masks
-        grad_masks = self.get_grad_masks(
-            {'params': self.actor.params}, self.cumul_masks
-        )
-        self.param_masks = freeze(grad_masks)
-
+    def reset_agent(self):
         # re-initialize params of critic ,target_critic and temperature
         self.rng, key_critic, key_temp, key_actor = jax.random.split(self.rng, 4)
 
@@ -575,6 +559,31 @@ class CoTASPLearner(SACLearner):
         )
         self.actor = self.actor.update_params(new_params)
 
+        # reset optimizers
+        self.actor = self.actor.reset_optimizer()
+        self.critic = self.critic.reset_optimizer()
+        self.temp = self.temp.reset_optimizer()
+
+    def end_task(self, task_id: int, save_actor_dir: str, save_dict_dir: str):
+        self.step = 0
+
+        self.rng, _, dicts = _sample_actions(
+            self.rng, self.actor, self.dummy_o, jnp.array([task_id])
+        )
+        current_masks = dicts['masks']
+
+        # cumulative attention from all the previous tasks
+        self.cumul_masks = tree_map(
+            lambda a, b: jnp.maximum(a, b), self.cumul_masks, current_masks
+        )
+
+        # To condition the training of task t + 1, we compute 
+        # the gradient masks according to cumulative binary masks
+        grad_masks = self.get_grad_masks(
+            {'params': self.actor.params}, self.cumul_masks
+        )
+        self.param_masks = freeze(grad_masks)
+
         # update dictionary learners
         dict_stats = {}
         if self.update_dict:
@@ -597,10 +606,7 @@ class CoTASPLearner(SACLearner):
                         'change_of_d': 0
                     }
 
-        # reset optimizers
-        self.actor = self.actor.reset_optimizer()
-        self.critic = self.critic.reset_optimizer()
-        self.temp = self.temp.reset_optimizer()
+        self.reset_agent()
 
         if save_actor_dir is not None and save_dict_dir is not None:
             # save actor params
@@ -625,3 +631,126 @@ class CoTASPLearner(SACLearner):
         grad_masks = self.get_grad_masks(
             {'params': self.actor.params}, self.cumul_masks)
         self.param_masks = freeze(grad_masks)
+
+
+class TaDeLL(SACLearner):
+    def __init__(
+        self,
+        seed: int,
+        observations: jnp.ndarray,
+        actions: jnp.ndarray,
+        load_policy_dir: Optional[str] = None,
+        load_dict_dir: Optional[str] = None,
+        dict_configs: dict = {},
+        optim_configs: dict = {},
+        actor_configs: dict = {},
+        critic_configs: dict = {},
+        tau: float = 0.005,
+        discount: float = 0.99,
+        target_update_period: int = 1,
+        target_entropy: Optional[float] = None,
+        init_temperature: float = 1.0):
+        super(TaDeLL, self).__init__(seed, observations, actions, optim_configs,
+              actor_configs, critic_configs, discount, tau, target_update_period,
+              target_entropy, init_temperature)
+
+        flat_actor_params, pack_fn = ravel_pytree(unfreeze(self.actor.params))
+        feature_dim = len(flat_actor_params) + 384
+        self.dict_learner = OnlineDictLearnerV2(
+            feature_dim,
+            20,
+            seed,
+            None, # whether using svd dictionary initialization
+            **dict_configs
+        )
+
+        if load_policy_dir is not None:
+            self.actor = self.actor.load(load_policy_dir)
+        if load_dict_dir is not None:
+            self.dict_learner.load(f'{load_dict_dir}.pkl')
+
+        self.pack_jit = jax.jit(pack_fn)
+        self.dict_cfgs = dict_configs
+        self.num_params = len(flat_actor_params)
+        self.eval_actor = deepcopy(self.actor)
+        self.task_params = []
+        self.task_encoder = SentenceTransformer('all-MiniLM-L12-v2')
+
+    def start_task(self, description: str):
+        self.task_emb = self.task_encoder.encode(description)[np.newaxis]
+
+        # set actor parameters via sparse coding of task embedding
+        task_code = sparse_encode(
+            self.task_emb,
+            self.dict_learner.D[:, self.num_params:],
+            algorithm=self.dict_cfgs['method'], 
+            alpha=self.dict_cfgs['alpha'],
+            check_input=False,
+            positive=self.dict_cfgs['positive_code'],
+            max_iter=10000)
+        
+        recon_params = np.dot(
+            task_code, self.dict_learner.D[:, :self.num_params]
+        )
+
+        new_actor_params = self.pack_jit(recon_params.flatten())
+        self.actor = self.actor.update_params(freeze(new_actor_params))
+
+    def sample_actions(self,
+                       observations: np.ndarray,
+                       temperature: float = 1.0,
+                       eval_mode: bool = False) -> jnp.ndarray:
+
+        if eval_mode:
+            rng, actions = policies.sample_actions(self.rng, self.eval_actor.apply_fn,
+                                                   self.eval_actor.params, observations,
+                                                   temperature)
+        else:
+            rng, actions = policies.sample_actions(self.rng, self.actor.apply_fn,
+                                                   self.actor.params, observations,
+                                                   temperature)
+        self.rng = rng
+
+        actions = self.invalid_filter(actions)
+        return actions
+
+    def select_actor(self, task_id):
+        if task_id < len(self.task_params):
+            self.eval_actor = self.eval_actor.update_params(self.task_params[task_id])
+        else:
+            self.eval_actor = self.eval_actor.update_params(self.actor.params)
+
+    def end_task(self, save_actor_dir: str):
+        # update dictionary
+        self.task_params.append(deepcopy(self.actor.params))
+        flat_actor_params, _ = ravel_pytree(unfreeze(self.actor.params))
+        sample = np.hstack([flat_actor_params[np.newaxis], self.task_emb])
+        s_code = self.dict_learner.get_alpha(sample)
+        self.dict_learner.update_dict(s_code, sample)
+
+        # reset params for critic ,target_critic and temperature
+        self.rng, key_critic, key_temp = jax.random.split(self.rng, 3)
+
+        self.critic = utils_fn.reset_model(
+            self.critic, 
+            critic_net.DoubleCritic,
+            self.critic_cfgs,
+            [key_critic, self.dummy_o, self.dummy_a])
+
+        self.target_critic = self.target_critic.update_params(self.critic.params)
+
+        self.temp = utils_fn.reset_model(
+            self.temp,
+            temperature.Temperature,
+            {'init_log_temp': self.init_temp},
+            [key_temp])
+
+        # reset optimizers
+        self.actor = self.actor.reset_optimizer()
+        self.critic = self.critic.reset_optimizer()
+        self.temp = self.temp.reset_optimizer()
+
+        if save_actor_dir is not None:
+            # save actor params
+            self.actor.save(save_actor_dir)
+

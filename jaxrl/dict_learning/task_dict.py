@@ -6,10 +6,10 @@ import jax
 import numpy as np
 import flax.linen as nn
 from scipy import spatial
-from scipy.special import softmax
 from sklearn.decomposition import DictionaryLearning, sparse_encode
 from sklearn.linear_model import Lasso
 from sklearn.utils import check_array, check_random_state
+from sklearn.utils.extmath import randomized_svd
 from sklearn.metrics.pairwise import cosine_similarity
 
 
@@ -246,6 +246,7 @@ class OnlineDictLearnerV2(object):
                  n_features: int, 
                  n_components: int,
                  seed: int=0,
+                 init_sample: np.ndarray=None,
                  c: float=1e-2,
                  scale: float=1.0,
                  alpha: float=1e-3,
@@ -258,13 +259,27 @@ class OnlineDictLearnerV2(object):
         self.rng = np.random.RandomState(seed=seed)
         self.A = np.zeros((n_components, n_components))
         self.B = np.zeros((n_features, n_components))
-        dictionary = self.rng.normal(loc=0.0, scale=scale, size=(n_components, n_features))
+
+        if init_sample is None:
+            dictionary = self.rng.normal(loc=0.0, scale=scale, size=(n_components, n_features))
+            # Projection on the constraint set ||V_k|| <= c
+            for j in range(n_components):
+                dictionary[j] /= max(np.linalg.norm(dictionary[j]), 1)
+                dictionary[j] *= c
+        else:
+            _, S, dictionary = randomized_svd(init_sample, n_components, random_state=self.rng)
+            dictionary = S[:, np.newaxis] * dictionary
+            r = len(dictionary)
+            if n_components <= r:
+                dictionary = dictionary[:n_components, :]
+            else:
+                dictionary = np.r_[
+                    dictionary,
+                    np.zeros((n_components - r, dictionary.shape[1]), dtype=dictionary.dtype),
+                ]
+
         dictionary = check_array(dictionary, order="F", copy=False)
         self.D = np.require(dictionary, requirements="W")
-        # Projection on the constraint set ||V_k|| <= c
-        for j in range(n_components):
-            self.D[j] /= max(np.linalg.norm(self.D[j]), 1)
-            self.D[j] *= c
         
         self.C = None
         self.c = c
@@ -463,14 +478,17 @@ if __name__ == "__main__":
         'task 15', 'task 17', 'task 18', 'task 19', 'task 20'
     ]
 
+    init_embedding = model.encode('Press a handle down sideways.')
+
     dict_learner = OnlineDictLearnerV2(
         n_features=384,
         n_components=1024,
         seed=0,
+        init_sample=None,
         c=1.0,
         alpha=1e-3,
         method='lasso_lars',
-        positive_code=False,
+        positive_code=True,
         scale_code=False,
         verbose=True)
 
@@ -484,7 +502,7 @@ if __name__ == "__main__":
 
         # mimic RL finetuning
         code += np.random.normal(size=code.shape) * 1.0
-        code = np.clip(code, -1.0, 1.0)
+        code = np.clip(code, 0, 10.0)
 
         # online update dictionary via CD
         dict_learner.update_dict(code, task_embedding[np.newaxis, :])

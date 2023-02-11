@@ -41,6 +41,9 @@ flags.DEFINE_integer('start_training', int(1e4), 'Number of training steps to st
 flags.DEFINE_integer('theta_step', int(90), 'Number of training steps for theta.')
 flags.DEFINE_integer('alpha_step', int(10), 'Number of finetune steps for alpha.')
 
+flags.DEFINE_integer('reset_interval', int(2.5e5), 'Periodicity of resets.')
+flags.DEFINE_boolean('resets', False, 'Periodically reset the agent networks.')
+
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 
 flags.DEFINE_boolean('tqdm', False, 'Use tqdm progress bar.')
@@ -202,6 +205,10 @@ def main(_):
                     eval_stats['used_capacity'] = update_info['used_capacity']
                     eval_stats['steps_per_task'] = FLAGS.max_step
                     log.update(eval_stats)
+                
+                if FLAGS.resets and i % FLAGS.reset_interval == 0 and i < FLAGS.max_step:
+                    # resetting trick
+                    agent.reset_agent()
         
             '''
             Updating miscellaneous things

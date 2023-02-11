@@ -1,28 +1,26 @@
 import functools
 from typing import Any, Callable, Optional, Sequence, Tuple
 
-import chex
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import jax.random as random
 import numpy as np
 from jax import custom_jvp
-from flax.linen.module import init
 from tensorflow_probability.substrates import jax as tfp
 
 tfd = tfp.distributions
 tfb = tfp.bijectors
 
 from jaxrl.networks.common import MLP, Params, PRNGKey, \
-    default_init, activation_fn, RMSNorm
+    default_init, activation_fn, RMSNorm, identical_clip
 
 # from common import MLP, Params, PRNGKey, default_init, \
 #     activation_fn, RMSNorm, create_mask, zero_grads
 
 
-LOG_STD_MIN = -10.0
 LOG_STD_MAX = 2.0
+LOG_STD_MIN = -20.0
 
 
 class MSEPolicy(nn.Module):
@@ -112,7 +110,6 @@ class NormalTanhPolicy(nn.Module):
     final_fc_init_scale: float = 1.0
     log_std_min: Optional[float] = None
     log_std_max: Optional[float] = None
-    init_mean: Optional[jnp.ndarray] = None
     clip_mean: float = 1.0
     tanh_squash: bool = True
 
@@ -120,24 +117,23 @@ class NormalTanhPolicy(nn.Module):
     def __call__(self,
                  observations: jnp.ndarray,
                  temperature: float = 1.0) -> tfd.Distribution:
-        outputs = MLP(self.hidden_dims,
-                      activations=activation_fn(self.name_activation),
-                      activate_final=True,
-                      use_layer_norm=self.use_layer_norm)(observations)
+        h = MLP(self.hidden_dims,
+                activations=activation_fn(self.name_activation),
+                activate_final=True,
+                use_layer_norm=self.use_layer_norm)(observations)
 
-        means = nn.Dense(self.action_dim,
-                         kernel_init=default_init(
-                         self.final_fc_init_scale))(outputs)
-        if self.init_mean is not None:
-            means += self.init_mean
+        means = nn.Dense(
+            self.action_dim,
+            kernel_init=default_init(self.final_fc_init_scale))(h)
 
         if self.state_dependent_std:
-            log_stds = nn.Dense(self.action_dim,
-                                kernel_init=default_init(
-                                    self.final_fc_init_scale))(outputs)
+            log_stds = nn.Dense(
+                self.action_dim,
+                kernel_init=default_init(self.final_fc_init_scale))(h)
         else:
-            log_stds = self.param('log_stds', nn.initializers.zeros,
-                                  (self.action_dim,))
+            log_stds = self.param(
+                'log_stds', nn.initializers.zeros, (self.action_dim,)
+            )
 
         log_std_min = self.log_std_min or LOG_STD_MIN
         log_std_max = self.log_std_max or LOG_STD_MAX
@@ -150,9 +146,6 @@ class NormalTanhPolicy(nn.Module):
             jnp.where(means < -self.clip_mean, -self.clip_mean, means)
         )
 
-        # if not self.tanh_squash:
-        #     means = nn.tanh(means)
-
         # numerically stable method
         base_dist = tfd.Normal(loc=means, scale=jnp.exp(log_stds) * temperature)
 
@@ -161,151 +154,6 @@ class NormalTanhPolicy(nn.Module):
                                    reinterpreted_batch_ndims=1)
         else:
             return base_dist
-
-
-class ConditionalNTPolicy(nn.Module):
-    hidden_dims: Sequence[int]
-    action_dim: int
-    state_dependent_std: bool = True
-    name_activation: str = 'leaky_relu'
-    use_layer_norm: bool = True
-    dropout_rate: Optional[float] = None
-    final_fc_init_scale: float = 1.0
-    log_std_min: Optional[float] = None
-    log_std_max: Optional[float] = None
-    tanh_squash_distribution: bool = True
-    init_mean: Optional[jnp.ndarray] = None
-
-    @nn.compact
-    def __call__(self,
-                 observations: jnp.ndarray,
-                 conditions: jnp.ndarray,
-                 temperature: float = 1.0,
-                 training: bool = False) -> tfd.Distribution:
-        # concatenate the conditions and obs
-        batch_s = observations.shape[0]
-        conds_d = conditions.shape[1]
-        conditions = jnp.broadcast_to(conditions, (batch_s, conds_d))
-        inputs = jax.lax.concatenate([conditions, observations], 1)
-        # MLP backbone
-        outputs = MLP(self.hidden_dims,
-                      activations=activation_fn(self.name_activation),
-                      activate_final=True,
-                      use_layer_norm=self.use_layer_norm)(inputs,
-                                                      training=training)
-
-        means = nn.Dense(self.action_dim,
-                         kernel_init=default_init(
-                             self.final_fc_init_scale))(outputs)
-        if self.init_mean is not None:
-            means += self.init_mean
-
-        if self.state_dependent_std:
-            log_stds = nn.Dense(self.action_dim,
-                                kernel_init=default_init(
-                                    self.final_fc_init_scale))(outputs)
-        else:
-            log_stds = self.param('log_stds', nn.initializers.zeros,
-                                  (self.action_dim, ))
-
-        log_std_min = self.log_std_min or LOG_STD_MIN
-        log_std_max = self.log_std_max or LOG_STD_MAX
-        log_stds = jnp.clip(log_stds, log_std_min, log_std_max)
-
-        if not self.tanh_squash_distribution:
-            means = nn.tanh(means)
-
-        base_dist = tfd.MultivariateNormalDiag(loc=means,
-                                               scale_diag=jnp.exp(log_stds) *
-                                               temperature)
-        if self.tanh_squash_distribution:
-            return tfd.TransformedDistribution(distribution=base_dist,
-                                               bijector=tfb.Tanh())
-        else:
-            return base_dist
-
-
-class EmbeddedNTPolicy(nn.Module):
-    hidden_dims: Sequence[int]
-    action_dim: int
-    codes_dims: Sequence[int]
-    components_dims: Sequence[int]
-    state_dependent_std: bool = True
-    name_activation: str = 'leaky_relu'
-    use_layer_norm: bool = True
-    dropout_rate: Optional[float] = None
-    final_fc_init_scale: float = 1.0
-    log_std_min: Optional[float] = None
-    log_std_max: Optional[float] = None
-    tanh_squash_distribution: bool = True
-    init_mean: Optional[jnp.ndarray] = None
-
-    @nn.compact
-    def __call__(self,
-                 observations: jnp.ndarray,
-                 temperature: float = 1.0,
-                 training: bool = False) -> tfd.Distribution:
-        # concatenate the embeddings and obs
-        codes = self.param("codes", nn.initializers.zeros, self.codes_dims)
-        components = self.param("components", nn.initializers.zeros, self.components_dims)
-        embeds = jax.lax.dot(codes, components)
-        batch_s = observations.shape[0]
-        embed_d = embeds.shape[1]
-        embeds = jnp.broadcast_to(embeds, (batch_s, embed_d))
-        inputs = jax.lax.concatenate([embeds, observations], 1)
-        # MLP backbone
-        outputs = MLP(self.hidden_dims,
-                      activations=activation_fn(self.name_activation),
-                      activate_final=True,
-                      use_layer_norm=self.use_layer_norm)(inputs,
-                                                      training=training)
-
-        means = nn.Dense(self.action_dim,
-                         kernel_init=default_init(
-                             self.final_fc_init_scale))(outputs)
-        if self.init_mean is not None:
-            means += self.init_mean
-
-        if self.state_dependent_std:
-            log_stds = nn.Dense(self.action_dim,
-                                kernel_init=default_init(
-                                    self.final_fc_init_scale))(outputs)
-        else:
-            log_stds = self.param('log_stds', nn.initializers.zeros,
-                                  (self.action_dim, ))
-
-        log_std_min = self.log_std_min or LOG_STD_MIN
-        log_std_max = self.log_std_max or LOG_STD_MAX
-        log_stds = jnp.clip(log_stds, log_std_min, log_std_max)
-
-        if not self.tanh_squash_distribution:
-            means = nn.tanh(means)
-
-        base_dist = tfd.MultivariateNormalDiag(loc=means,
-                                               scale_diag=jnp.exp(log_stds) *
-                                               temperature)
-        if self.tanh_squash_distribution:
-            return tfd.TransformedDistribution(distribution=base_dist,
-                                               bijector=tfb.Tanh())
-        else:
-            return base_dist
-
-
-class Coder(nn.Module):
-    hidden_lens: int
-    compnt_nums: int
-
-    def setup(self):
-        self.codes_bb = nn.Embed(
-            self.hidden_lens, 
-            self.compnt_nums)
-        # embedding_init=jax.nn.initializers.zeros
-    
-    def __call__(self):
-        codes = {}
-        for i in range(self.hidden_lens):
-            codes[f'embeds_bb_{i}'] = {'codes': self.codes_bb(jnp.array([i]))}
-        return codes
 
 
 @custom_jvp
@@ -448,125 +296,6 @@ class MetaPolicy(nn.Module):
 
         kernel_e = jnp.broadcast_to(post_m.reshape(-1, 1), (self.hidden_dims[-1], self.action_dim))
         grad_masks[(self.mean_layer.name, 'kernel')] = 1 - kernel_e
-        
-        return grad_masks
-
-
-class MaskedTanhPolicy(nn.Module):
-    hidden_dims: Sequence[int]
-    action_dim: int
-    task_num: int
-    state_dependent_std: bool = True
-    name_activation: str = 'leaky_relu'
-    use_layer_norm: bool = False
-    use_rms_norm: bool = True
-    final_fc_init_scale: float = 1.0
-    log_std_min: Optional[float] = None
-    log_std_max: Optional[float] = None
-    tanh_squash_distribution: bool = True
-
-    def setup(self):
-        if self.use_layer_norm and self.use_rms_norm:
-            raise ValueError("use_layer_norm and use_rms_norm cannot both be true")
-
-        self.backbones = [nn.Dense(hidn, kernel_init=default_init()) \
-            for hidn in self.hidden_dims]
-        self.embeds_bb = [nn.Embed(self.task_num, hidn, embedding_init=nn.initializers.normal(1.0)) \
-            for hidn in self.hidden_dims]
-        
-        self.mean_layer = nn.Dense(
-            self.action_dim, 
-            kernel_init=default_init(self.final_fc_init_scale),
-            use_bias=False
-        )
-
-        if self.state_dependent_std:
-            self.log_std_layer = nn.Dense(
-                self.action_dim, 
-                kernel_init=default_init(self.final_fc_init_scale),
-                use_bias=False
-            )
-        else:
-            self.log_std_layer = self.param(
-                'log_std_layer', nn.initializers.zeros, 
-                (self.action_dim,)
-            )
-
-        self.activation = activation_fn(self.name_activation)
-        if self.use_layer_norm:
-            self.normalizer = nn.LayerNorm(use_bias=False, use_scale=False)
-        elif self.use_rms_norm:
-            self.normalizer = RMSNorm(axis=1)
-        else:
-            self.normalizer = None
-
-    def __call__(self,
-                 key: chex.PRNGKey,
-                 x: jnp.ndarray,
-                 t: jnp.ndarray,
-                 s: float = 1.0,
-                 temperature: float = 1.0):
-        masks = {}
-        for i, layer in enumerate(self.backbones):
-            x = layer(x)
-            g = tfd.RelaxedBernoulli(
-                temperature=s, 
-                logits=self.embeds_bb[i](t)/s).sample(seed=key)
-            masks[layer.name] = {'embedding': g}
-            x = self.activation(x)
-            x = x * jnp.broadcast_to(g, x.shape)
-            if self.use_layer_norm or self.use_rms_norm:
-                x = self.normalizer(x)
-        
-        means = self.mean_layer(x)
-
-        if not self.tanh_squash_distribution:
-            means = nn.tanh(means)
-
-        if self.state_dependent_std:
-            log_stds = self.log_std_layer(x)
-        else:
-            log_stds = self.log_std_layer
-
-        # clip log_std
-        log_std_min = self.log_std_min or LOG_STD_MIN
-        log_std_max = self.log_std_max or LOG_STD_MAX
-        log_stds = jnp.clip(log_stds, log_std_min, log_std_max)
-        
-        # numerically unstable method for unbounded means
-        # base_dist = tfd.MultivariateNormalDiag(loc=means,
-        #                                        scale_diag=jnp.exp(log_stds) *
-        #                                        temperature)
-
-        # numerically stable method
-        base_dist = tfd.Normal(loc=means, scale=jnp.exp(log_stds) * temperature)
-
-        if self.tanh_squash_distribution:
-            return tfd.Independent(TanhTransformedDistribution(base_dist), 
-                                   reinterpreted_batch_ndims=1), {'masks': masks, 'means': means}
-        else:
-            return base_dist, {'masks': masks, 'means': means}
-
-    def get_grad_masks(self, masks: dict, input_dim: int = 12):
-        grad_masks = {}
-        for i, layer in enumerate(self.backbones):
-            if i == 0:
-                post_e = masks[layer.name]['embedding']
-                grad_masks[layer.name] = {
-                    'kernel': 1-jnp.broadcast_to(post_e, (input_dim, self.hidden_dims[i])),
-                    'bias': 1-post_e.flatten()}
-                pre_e = masks[layer.name]['embedding']
-            else:
-                post_e = masks[layer.name]['embedding']
-                kernel_e = jnp.minimum(
-                    jnp.broadcast_to(pre_e.reshape(-1, 1), (self.hidden_dims[i-1], self.hidden_dims[i])),
-                    jnp.broadcast_to(post_e, (self.hidden_dims[i-1], self.hidden_dims[i]))
-                )
-                grad_masks[layer.name] = {'kernel': 1-kernel_e, 'bias': 1-post_e.flatten()}
-                pre_e = masks[layer.name]['embedding']
-
-        kernel_e = jnp.broadcast_to(pre_e.reshape(-1, 1), (self.hidden_dims[-1], self.action_dim))
-        grad_masks[self.mean_layer.name] = {'kernel': 1-kernel_e}
         
         return grad_masks
 

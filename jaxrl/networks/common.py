@@ -1,5 +1,5 @@
 import os
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Sequence
 
 import numpy as np
 import flax
@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from jax.tree_util import tree_map
+from jax import custom_jvp
 from flax.core import freeze, unfreeze, FrozenDict
 from flax import traverse_util
 from flax import struct
@@ -155,7 +156,6 @@ def reset_logstd_layer(
         bias = params_actor['log_std_layer']['bias']
 
         rng, key = jax.random.split(rng)
-        # init_kernel = default_init(scale)(key, kernel.shape, jnp.float32)
         init_kernel = default_init(final_fc_init_scale)(key, kernel.shape)
         init_bias = nn.initializers.zeros_init()(key, bias.shape)
 
@@ -281,6 +281,22 @@ def linear_ascent(
         transition_begin=0)
 
 
+@custom_jvp
+def identical_clip(x, a_min, a_max):
+    return jnp.minimum(jnp.maximum(x, a_min), a_max)
+
+@identical_clip.defjvp
+def f_jvp(primals, tangents):
+    # Custom derivative rule for identical_clip 
+    # x' = 1 for all time according to
+    # https://arxiv.org/pdf/2006.05990.pdf [footnote 25]
+    x, a_min, a_max = primals
+    x_dot, _, _ = tangents
+    ans = identical_clip(x, a_min, a_max)
+    ans_dot = jnp.ones_like(x) * x_dot
+    return ans, ans_dot
+
+
 class RMSNorm(nn.Module):
     axis: int
     eps: float = 1e-5
@@ -390,7 +406,7 @@ class TrainState(struct.PyTreeNode):
 
     def reset_optimizer(self) -> 'TrainState': 
         # contain the count argument
-        init_opt_state = jax.tree_util.tree_map(
+        init_opt_state = tree_map(
             lambda x: jnp.zeros_like(x), self.opt_state
         )
         return self.replace(opt_state=init_opt_state)
@@ -403,7 +419,7 @@ class TrainState(struct.PyTreeNode):
     def load(self, load_path: str) -> 'TrainState':
         with open(load_path, 'rb') as f:
             params = flax.serialization.from_bytes(self.params, f.read())
-            params = jax.tree_util.tree_map(jnp.array, params)
+            params = tree_map(jnp.array, params)
         return self.replace(params=params)
 
     @classmethod
@@ -461,10 +477,12 @@ class MPNTrainState(struct.PyTreeNode):
 
     def reset_optimizer(self):
         # contain the count argument
-        opt_state_theta = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x),
-                                                 self.opt_state_theta)
-        opt_state_alpha = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x),
-                                                 self.opt_state_alpha)
+        opt_state_theta = tree_map(
+            lambda x: jnp.zeros_like(x), self.opt_state_theta
+        )
+        opt_state_alpha = tree_map(
+            lambda x: jnp.zeros_like(x), self.opt_state_alpha
+        )
         return self.replace(opt_state_theta=opt_state_theta,
                             opt_state_alpha=opt_state_alpha)
 
@@ -476,7 +494,7 @@ class MPNTrainState(struct.PyTreeNode):
     def load(self, load_path: str) -> 'MPNTrainState':
         with open(load_path, 'rb') as f:
             params = flax.serialization.from_bytes(self.params, f.read())
-            params = jax.tree_util.tree_map(jnp.array, params)
+            params = tree_map(jnp.array, params)
         return self.replace(params=params)
 
     @classmethod
