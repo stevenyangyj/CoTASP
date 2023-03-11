@@ -17,17 +17,16 @@ from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', "cw2-test", 'Environment name.')
+flags.DEFINE_string('env_name', "cw2-ab-button-press", 'Environment name.')
 flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/CoTASP/logs', 'Tensorboard logging dir.')
-flags.DEFINE_integer('seed', 60, 'Random seed.')
+flags.DEFINE_integer('seed', 7409, 'Random seed.')
 flags.DEFINE_string('base_algo', 'tadell', 'base learning algorithm')
 
-flags.DEFINE_boolean('ablation', False, 'Ablation study')
-flags.DEFINE_boolean('save_checkpoint', False, 'Save meta-policy network parameters')
+flags.DEFINE_boolean('save_checkpoint', False, 'Save learned dictionary')
 
-flags.DEFINE_string('env_type', 'deterministic', 'The type of env is either deterministic or random_init_all')
+flags.DEFINE_string('env_type', 'random_init_all', 'The type of env is either deterministic or random_init_all')
 flags.DEFINE_boolean('normalize_reward', False, 'Normalize rewards')
-flags.DEFINE_integer('eval_episodes', 1, 'Number of episodes used for evaluation.')
+flags.DEFINE_integer('eval_episodes', 10, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
 flags.DEFINE_integer('batch_size', 256, 'Mini batch size.')
@@ -61,9 +60,9 @@ def main(_):
     run_name = f"{FLAGS.env_name}__{algo}__{FLAGS.seed}__{int(time.time())}"
 
     if FLAGS.save_checkpoint:
-        save_policy_dir = f"logs/saved_actors/{run_name}.json"
+        save_dict_dir = f"logs/saved_dicts/{run_name}.pkl"
     else:
-        save_policy_dir = None
+        save_dict_dir = None
 
     wandb.init(
         project=FLAGS.wandb_project_name,
@@ -92,7 +91,8 @@ def main(_):
         agent = TaDeLL(
             FLAGS.seed,
             temp_env.observation_space.sample()[np.newaxis],
-            temp_env.action_space.sample()[np.newaxis], 
+            temp_env.action_space.sample()[np.newaxis],
+            'logs/saved_dicts/cw20__tadell__1337__1678099433.pkl',
             **kwargs)
         del temp_env
     else:
@@ -101,12 +101,7 @@ def main(_):
     # continual learning loop
     eval_envs = []
     for task_idx, dict_task in enumerate(seq_tasks):
-        # only for ablation study
-        if task_idx == 0 and FLAGS.ablation:
-            eval_seed = 60
-        else:
-            eval_seed = FLAGS.seed
-        eval_envs.append(get_single_env(dict_task['task'], eval_seed, randomization=FLAGS.env_type))
+        eval_envs.append(get_single_env(dict_task['task'], FLAGS.seed, randomization=FLAGS.env_type))
 
     # continual learning loop
     total_env_steps = 0
@@ -132,8 +127,8 @@ def main(_):
 
         observation, done = env.reset(), False
         for i in tqdm.tqdm(range(1, FLAGS.max_steps + 1),
-                        smoothing=0.1,
-                        disable=not FLAGS.tqdm):
+                           smoothing=0.1,
+                           disable=not FLAGS.tqdm):
             if i < FLAGS.start_training:
                 action = env.action_space.sample()
             else:
@@ -185,7 +180,7 @@ def main(_):
         Updating miscellaneous things
         '''
         print('End the current task')
-        agent.end_task(save_policy_dir)
+        agent.end_task(save_dict_dir)
 
     # save log data
     log.save()

@@ -1,12 +1,12 @@
 """Implementations of algorithms for continuous control."""
 
 from copy import deepcopy
-import functools
-from typing import Optional, Tuple, Callable, Any
+from typing import Optional, Tuple, Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from optax import global_norm
 from jax.tree_util import tree_map
 from jax.flatten_util import ravel_pytree
 from flax import linen as nn
@@ -265,8 +265,26 @@ def _update_alpha(
     # grads of actor
     grads_actor, actor_info = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
     # recording info
-    actor_info['g_norm_actor'] = utils_fn.global_norm(grads_actor)
+    g_norm = global_norm(grads_actor)
+    actor_info['g_norm_actor'] = g_norm
     actor_info['used_capacity'] = 1.0 - utils_fn.rate_activity(param_mask)
+
+    # global clipping
+    trigger = jnp.squeeze(g_norm < 1.0)
+    def global_clip_fn(t):
+        return jax.lax.select(trigger, t, (t / g_norm.astype(t.dtype)) * 1.0)
+    grads_actor = tree_map(global_clip_fn, grads_actor)
+
+    # Maksing gradients according to cumulative binary masks
+    unfrozen_grads = unfreeze(grads_actor)
+    for path, value in param_mask.items():
+        cursor = unfrozen_grads
+        for key in path[:-1]:
+            if key in cursor:
+                cursor = cursor[key]
+        cursor[path[-1]] *= value
+    
+    actor_info['masked_g_norm_actor'] = global_norm(unfrozen_grads)
 
     # only update coefficients (alpha)
     new_actor = actor.apply_grads_alpha(grads=grads_actor)
@@ -302,8 +320,15 @@ def _update_theta(
     # grads of actor
     grads_actor, actor_info = jax.grad(actor_loss_fn, has_aux=True)(actor.params)
     # recording info
-    actor_info['g_norm_actor'] = utils_fn.global_norm(grads_actor)
+    g_norm = global_norm(grads_actor)
+    actor_info['g_norm_actor'] = g_norm
     actor_info['used_capacity'] = 1.0 - utils_fn.rate_activity(param_mask)
+
+    # global clipping
+    trigger = jnp.squeeze(g_norm < 1.0)
+    def global_clip_fn(t):
+        return jax.lax.select(trigger, t, (t / g_norm.astype(t.dtype)) * 1.0)
+    grads_actor = tree_map(global_clip_fn, grads_actor)
 
     # Maksing gradients according to cumulative binary masks
     unfrozen_grads = unfreeze(grads_actor)
@@ -313,7 +338,10 @@ def _update_theta(
             if key in cursor:
                 cursor = cursor[key]
         cursor[path[-1]] *= value
+
+    actor_info['masked_g_norm_actor'] = global_norm(unfrozen_grads)
     
+    # only update policy parameters (theta)
     new_actor = actor.apply_grads_theta(grads=freeze(unfrozen_grads))
 
     return rng, new_actor, actor_info
@@ -329,7 +357,7 @@ def _update_temp(
     
     grads_temp, temp_info = jax.grad(temperature_loss_fn, has_aux=True)(temp.params)
     # recording info
-    temp_info['g_norm_temp'] = utils_fn.global_norm(grads_temp)
+    temp_info['g_norm_temp'] = global_norm(grads_temp)
 
     new_temp = temp.apply_gradients(grads=grads_temp)
 
@@ -360,7 +388,7 @@ def _update_critic(
     
     grads_critic, critic_info = jax.grad(critic_loss_fn, has_aux=True)(critic.params)
     # recording info
-    critic_info['g_norm_critic'] = utils_fn.global_norm(grads_critic)
+    critic_info['g_norm_critic'] = global_norm(grads_critic)
 
     new_critic = critic.apply_gradients(grads=grads_critic)
     new_target_critic = target_update(new_critic, target_critic, tau)
@@ -639,7 +667,6 @@ class TaDeLL(SACLearner):
         seed: int,
         observations: jnp.ndarray,
         actions: jnp.ndarray,
-        load_policy_dir: Optional[str] = None,
         load_dict_dir: Optional[str] = None,
         dict_configs: dict = {},
         optim_configs: dict = {},
@@ -664,10 +691,8 @@ class TaDeLL(SACLearner):
             **dict_configs
         )
 
-        if load_policy_dir is not None:
-            self.actor = self.actor.load(load_policy_dir)
         if load_dict_dir is not None:
-            self.dict_learner.load(f'{load_dict_dir}.pkl')
+            self.dict_learner.load(load_dict_dir)
 
         self.pack_jit = jax.jit(pack_fn)
         self.dict_cfgs = dict_configs
@@ -720,7 +745,7 @@ class TaDeLL(SACLearner):
         else:
             self.eval_actor = self.eval_actor.update_params(self.actor.params)
 
-    def end_task(self, save_actor_dir: str):
+    def end_task(self, save_dict_dir: str):
         # update dictionary
         self.task_params.append(deepcopy(self.actor.params))
         flat_actor_params, _ = ravel_pytree(unfreeze(self.actor.params))
@@ -750,7 +775,7 @@ class TaDeLL(SACLearner):
         self.critic = self.critic.reset_optimizer()
         self.temp = self.temp.reset_optimizer()
 
-        if save_actor_dir is not None:
+        if save_dict_dir is not None:
             # save actor params
-            self.actor.save(save_actor_dir)
+            self.dict_learner.save(save_dict_dir)
 

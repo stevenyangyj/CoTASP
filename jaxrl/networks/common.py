@@ -51,28 +51,6 @@ def activation_fn(name: str = 'lrelu'):
     return act_fn
 
 
-def flattened_traversal(fn):
-    """Returns function that is called with `(path, param)` instead of pytree."""
-    def mask(tree):
-        flat = flax.traverse_util.flatten_dict(tree)
-        return flax.traverse_util.unflatten_dict(
-            {k: fn(k, v) for k, v in flat.items()})
-    return mask
-
-
-def create_mask(params, trainable_names):
-    def _map(params, mask, names):
-        for k in params:
-            if k.split('_')[0] in names:
-                mask[k] = 'train'
-            else:
-                mask[k] = 'fix'
-
-    mask = {}
-    _map(params, mask, trainable_names)
-    return freeze(mask)
-
-
 def filter_theta(path, _):
     for i in range(10):
         if f'backbones_{i}' in path:
@@ -90,26 +68,6 @@ def filter_alpha(path, _):
         if f'embeds_bb_{i}' in path:
             return 'frozen'
     return 'trainable'
-
-
-def abs_sq(x: jnp.array) -> jnp.array:
-    """Returns the squared norm of a (maybe complex) array.
-    For real `x`, JAX generates the same HLO from this, `jnp.square(x)`, `x * x`,
-    or `x**2`.
-    Args:
-        x: a (maybe complex) array.
-    Returns:
-        The squared norm of `x`.
-    """
-    if not isinstance(x, (np.ndarray, jnp.ndarray)):
-        raise ValueError(f"`abs_sq` accepts only NDarrays, got: {x}.")
-    return (x.conj() * x).real
-
-
-def global_norm(updates: Params) -> Params:
-    """Compute the global norm across a nested structure of tensors."""
-    return jnp.sqrt(sum(
-        jnp.sum(abs_sq(x)) for x in jax.tree_util.tree_leaves(updates)))
 
 
 def tree_l1_mean(updates: Params) -> jnp.array:

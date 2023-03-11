@@ -20,7 +20,7 @@ from jaxrl.networks.common import MLP, Params, PRNGKey, \
 
 
 LOG_STD_MAX = 2.0
-LOG_STD_MIN = -20.0
+LOG_STD_MIN = -10.0
 
 
 class MSEPolicy(nn.Module):
