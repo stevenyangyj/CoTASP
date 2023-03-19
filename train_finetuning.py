@@ -19,7 +19,7 @@ from continual_world import TASK_SEQS, get_single_env
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('env_name', "cw2-ab-reach", 'Environment name.')
-flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/CoTASP/logs', 'Tensorboard logging dir.')
+flags.DEFINE_string('save_dir', '', 'Tensorboard logging dir.')
 flags.DEFINE_integer('seed', 66, 'Random seed.')
 flags.DEFINE_string('base_algo', 'sac', 'base learning algorithm')
 

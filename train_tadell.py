@@ -18,7 +18,7 @@ from continual_world import TASK_SEQS, get_single_env
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('env_name', "cw2-ab-button-press", 'Environment name.')
-flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/CoTASP/logs', 'Tensorboard logging dir.')
+flags.DEFINE_string('save_dir', '', 'Tensorboard logging dir.')
 flags.DEFINE_integer('seed', 7409, 'Random seed.')
 flags.DEFINE_string('base_algo', 'tadell', 'base learning algorithm')
 
@@ -92,7 +92,6 @@ def main(_):
             FLAGS.seed,
             temp_env.observation_space.sample()[np.newaxis],
             temp_env.action_space.sample()[np.newaxis],
-            'logs/saved_dicts/cw20__tadell__1337__1678099433.pkl',
             **kwargs)
         del temp_env
     else:
