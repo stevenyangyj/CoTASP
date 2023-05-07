@@ -1,5 +1,5 @@
 import os
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import flax
@@ -14,6 +14,8 @@ from flax import traverse_util
 from flax import struct
 from flax import core
 
+from jaxrl.networks.lion_optax import lion
+
 
 PRNGKey = Any
 Params = flax.core.FrozenDict[str, Any]
@@ -24,7 +26,7 @@ InfoDict = Dict[str, float]
 
 
 def default_init(scale: Optional[float] = 1.0):
-    return nn.initializers.variance_scaling(scale, 'fan_out', 'normal')
+    return nn.initializers.variance_scaling(scale, 'fan_in', 'normal')
 
 
 def activation_fn(name: str = 'lrelu'):
@@ -98,6 +100,27 @@ def replace_embeds(pi_params: Params, codes: FrozenDict, components: FrozenDict,
     return freeze(actor_params)
 
 
+def _compute_fans(shape,
+                  in_axis: Union[int, Sequence[int]] = -2,
+                  out_axis: Union[int, Sequence[int]] = -1
+                  ) -> Tuple[Any, Any]:
+    """
+    Compute effective input and output sizes for a linear layer.
+    """
+    if isinstance(in_axis, int):
+        in_size = shape[in_axis]
+    else:
+        in_size = np.prod([shape[i] for i in in_axis])
+    if isinstance(out_axis, int):
+        out_size = shape[out_axis]
+    else:
+        out_size = np.prod([shape[i] for i in out_axis])
+
+    fan_in = in_size
+    fan_out = out_size
+    return fan_in, fan_out
+
+
 def reset_model(main_cls, model_cls, configs: dict, inputs: list):
     model = model_cls(**configs)
     _, new_params = model.init(*inputs).pop('params')
@@ -105,20 +128,21 @@ def reset_model(main_cls, model_cls, configs: dict, inputs: list):
 
 
 def reset_logstd_layer(
-    rng: PRNGKey, pi_params: Params, 
-    final_fc_init_scale: float, state_dependent_std: bool):
+    rng: PRNGKey, pi_params: Params, state_dependent_std: bool):
 
     params_actor = unfreeze(pi_params)
     if state_dependent_std:
         kernel = params_actor['log_std_layer']['kernel']
-        bias = params_actor['log_std_layer']['bias']
 
-        rng, key = jax.random.split(rng)
-        init_kernel = default_init(final_fc_init_scale)(key, kernel.shape)
-        init_bias = nn.initializers.zeros_init()(key, bias.shape)
+        rng, key_kernel = jax.random.split(rng)
+        # init_kernel = default_init(final_fc_init_scale)(key, kernel.shape)
+        # init_bias = nn.initializers.zeros_init()(key, bias.shape)
+        
+        # NISPA's re-initializing strategy
+        init_kernel = jnp.mean(key_kernel) + jax.random.normal(
+            key_kernel, shape=kernel.shape) * jnp.std(kernel)
 
         params_actor['log_std_layer']['kernel'] = init_kernel
-        params_actor['log_std_layer']['bias'] = init_bias
     else:
         params_actor['log_std_layer'] = jnp.zeros_like(params_actor['log_std_layer'])
     return rng, freeze(params_actor)
@@ -131,6 +155,7 @@ def reset_free_params(
     configs: dict, 
     inputs: list,
     adaptive_init: bool=True):
+    print('re-initialize remaining params for actor')
     if not adaptive_init:
         model = model_cls(**configs)
         _, init_params = model.init(*inputs).pop('params')
@@ -139,19 +164,42 @@ def reset_free_params(
         init_params = {}
         for path, value in param_masks.items():
             cursor = init_params
+            target = params
             for key in path[:-1]:
                 if key not in cursor:
                     cursor[key] = {}
                 cursor = cursor[key]
-            rng, key = jax.random.split(rng)
+                target = target[key]
+            rng, rnd_key = jax.random.split(rng)
+            # if path[-1] == 'kernel':
+                # previous rescale strategy
+                # if path[0] == 'mean_layer':
+                #     scale = jnp.mean(value) * configs['final_fc_init_scale']
+                # else:
+                #     scale = jnp.mean(value)
+                # cursor[path[-1]] = default_init(scale)(rnd_key, value.shape)
+                
+                # new rescale strategy
+                # if path[0] == 'mean_layer':
+                #     cursor[path[-1]] = default_init(configs['final_fc_init_scale'])(rnd_key, value.shape)
+                # else:
+                #     cursor[path[-1]] = default_init()(rnd_key, value.shape)
+                # cursor[path[-1]] /= jnp.mean(value)
+            # elif path[-1] == 'bias':
+            #     cursor[path[-1]] = nn.initializers.zeros_init()(rnd_key, value.shape)
+            # else:
+            #     raise NotImplementedError
+            
+            # NISPA's re-initializing strategy
+            target = target[path[-1]]
             if path[-1] == 'kernel':
-                if path[0] == 'mean_layer':
-                    rescale = jnp.mean(value) * configs['final_fc_init_scale']
-                else:
-                    rescale = jnp.mean(value)
-                cursor[path[-1]] = default_init(rescale)(key, value.shape)
+                init_mean = jnp.mean(target[target * (1 - value) != 0])
+                init_std = jnp.std(target[target * (1 - value) != 0])
+                print(path, init_mean, init_std)
+                cursor[path[-1]] = init_mean + jax.random.normal(
+                    rnd_key, shape=value.shape) * init_std
             elif path[-1] == 'bias':
-                cursor[path[-1]] = nn.initializers.zeros_init()(key, value.shape)
+                cursor[path[-1]] = nn.initializers.zeros_init()(rnd_key, target.shape)
             else:
                 raise NotImplementedError
 
@@ -185,6 +233,8 @@ def set_optimizer(
         optimizer = optax.adabelief(learning_rate=lr)
     elif optim_algo == 'amsgrad':
         optimizer = optax.amsgrad(learning_rate=lr)
+    elif optim_algo == 'lion':
+        optimizer = lion(learning_rate=lr, weight_decay=0)
     else:
         raise NotImplementedError
 
@@ -206,37 +256,6 @@ def set_optimizer(
         raise NotImplementedError
 
     return minimizer
-
-
-def linear_warm_start(
-    start_val: float, 
-    end_val: float, 
-    warm_steps: int, 
-    linear_steps: int) -> optax.Schedule:
-    list_schedules = [
-        optax.linear_schedule(
-            init_value=end_val,
-            end_value=start_val,
-            transition_steps=warm_steps,
-            transition_begin=0),
-        optax.linear_schedule(
-            init_value=start_val,
-            end_value=end_val,
-            transition_steps=linear_steps,
-            transition_begin=0)
-    ]
-    return optax.join_schedules(list_schedules, [warm_steps])
-
-
-def linear_ascent(
-    start_val: float, 
-    end_val: float, 
-    linear_steps: int) -> optax.Schedule:
-    return optax.linear_schedule(
-        init_value=start_val,
-        end_value=end_val,
-        transition_steps=linear_steps,
-        transition_begin=0)
 
 
 @custom_jvp
@@ -390,7 +409,7 @@ class TrainState(struct.PyTreeNode):
             params=params,
             tx=tx,
             opt_state=opt_state,
-            **kwargs,
+            **kwargs
         )
 
 

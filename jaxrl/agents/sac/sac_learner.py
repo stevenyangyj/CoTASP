@@ -1,6 +1,7 @@
 """Implementations of algorithms for continuous control."""
 
 from copy import deepcopy
+import functools
 from typing import Optional, Tuple, Any
 
 import jax
@@ -105,17 +106,25 @@ class SACLearner(object):
             tx=utils_fn.set_optimizer(**optim_configs)
         )
 
-        target_critic = deepcopy(critic)
+        tc_def = critic_net.DoubleCritic(**critic_configs)
+        _, tc_params = tc_def.init(
+            critic_key, observations, actions
+        ).pop('params')
+        target_critic = TrainState.create(
+            apply_fn=tc_def.apply,
+            params=tc_params,
+            tx=utils_fn.set_optimizer(**optim_configs)
+        )
 
-        opt_kwargs_temp = deepcopy(optim_configs)
-        opt_kwargs_temp['max_norm'] = -1.0
-        opt_kwargs_temp['clip_method'] = None
+        # opt_kwargs_temp = deepcopy(optim_configs)
+        # opt_kwargs_temp['max_norm'] = -1.0
+        # opt_kwargs_temp['clip_method'] = None
         temp_def = temperature.Temperature(init_temperature)
         _, temp_params = temp_def.init(temp_key).pop('params')
         temp = TrainState.create(
             apply_fn=temp_def.apply,
             params=temp_params,
-            tx=utils_fn.set_optimizer(**opt_kwargs_temp)
+            tx=utils_fn.set_optimizer(**optim_configs)
         )
 
         self.actor = actor
@@ -267,15 +276,17 @@ def _update_alpha(
     # recording info
     g_norm = global_norm(grads_actor)
     actor_info['g_norm_actor'] = g_norm
-    actor_info['used_capacity'] = 1.0 - utils_fn.rate_activity(param_mask)
+    for p, v in param_mask.items():
+        if p[-1] == 'kernel':
+            actor_info['used_capacity_'+p[0]] = 1.0 - jnp.mean(v)
 
     # global clipping
-    trigger = jnp.squeeze(g_norm < 1.0)
-    def global_clip_fn(t):
-        return jax.lax.select(trigger, t, (t / g_norm.astype(t.dtype)) * 1.0)
-    grads_actor = tree_map(global_clip_fn, grads_actor)
+    # trigger = jnp.squeeze(g_norm < 1.0)
+    # def global_clip_fn(t):
+    #     return jax.lax.select(trigger, t, (t / g_norm.astype(t.dtype)) * 1.0)
+    # grads_actor = tree_map(global_clip_fn, grads_actor)
 
-    # Maksing gradients according to cumulative binary masks
+    # Masking gradients according to cumulative binary masks
     unfrozen_grads = unfreeze(grads_actor)
     for path, value in param_mask.items():
         cursor = unfrozen_grads
@@ -322,15 +333,17 @@ def _update_theta(
     # recording info
     g_norm = global_norm(grads_actor)
     actor_info['g_norm_actor'] = g_norm
-    actor_info['used_capacity'] = 1.0 - utils_fn.rate_activity(param_mask)
+    for p, v in param_mask.items():
+        if p[-1] == 'kernel':
+            actor_info['used_capacity_'+p[0]] = 1.0 - jnp.mean(v)
 
     # global clipping
-    trigger = jnp.squeeze(g_norm < 1.0)
-    def global_clip_fn(t):
-        return jax.lax.select(trigger, t, (t / g_norm.astype(t.dtype)) * 1.0)
-    grads_actor = tree_map(global_clip_fn, grads_actor)
+    # trigger = jnp.squeeze(g_norm < 1.0)
+    # def global_clip_fn(t):
+    #     return jax.lax.select(trigger, t, (t / g_norm.astype(t.dtype)) * 1.0)
+    # grads_actor = tree_map(global_clip_fn, grads_actor)
 
-    # Maksing gradients according to cumulative binary masks
+    # Masking gradients according to cumulative binary masks
     unfrozen_grads = unfreeze(grads_actor)
     for path, value in param_mask.items():
         cursor = unfrozen_grads
@@ -365,8 +378,8 @@ def _update_temp(
 
 def _update_critic(
     rng: PRNGKey, task_id: int, actor: MPNTrainState, critic: TrainState, 
-    target_critic: TrainState, temp: TrainState, batch: Batch, discount: float, 
-    tau: float) -> Tuple[PRNGKey, TrainState, TrainState, InfoDict]:
+    target_critic: TrainState, update_target: bool, temp: TrainState, batch: Batch, 
+    discount: float, tau: float) -> Tuple[PRNGKey, TrainState, TrainState, InfoDict]:
     
     rng, key = jax.random.split(rng)
     dist, _ = actor(batch.next_observations, jnp.array([task_id]))
@@ -391,20 +404,46 @@ def _update_critic(
     critic_info['g_norm_critic'] = global_norm(grads_critic)
 
     new_critic = critic.apply_gradients(grads=grads_critic)
-    new_target_critic = target_update(new_critic, target_critic, tau)
+    
+    if update_target:
+        new_target_critic = target_update(new_critic, target_critic, tau)
+    else:
+        new_target_critic = target_update(new_critic, target_critic, 0)
 
     return rng, new_critic, new_target_critic, critic_info
 
 
-@jax.jit
+def _dummy_update(
+    rng: PRNGKey, task_id: int, actor: MPNTrainState, critic: TrainState, 
+    target_critic: TrainState, temp: TrainState, batch: Batch, discount: float, 
+    tau: float) -> Tuple[PRNGKey, TrainState, TrainState, InfoDict]:
+    
+    rng, _ = jax.random.split(rng)
+    critic_info = {'critic_loss': jnp.array(0, dtype=jnp.float32),
+                   'q1': jnp.array(0, dtype=jnp.float32),
+                   'q2': jnp.array(0, dtype=jnp.float32),
+                   'g_norm_critic': jnp.array(0, dtype=jnp.float32)}
+    
+    return rng, critic, target_critic, critic_info
+
+
+@functools.partial(jax.jit, static_argnames=('update_target'))
 def _update_cotasp_jit(rng: PRNGKey, task_id: int, tau: float, discount: float, 
     target_entropy: float, optimize_alpha: bool, param_mask: FrozenDict[str, Any], 
     actor: MPNTrainState, critic: TrainState, target_critic: TrainState, 
-    temp: TrainState, batch: Batch
+    update_target, temp: TrainState, batch: Batch
     ) -> Tuple[PRNGKey, MPNTrainState, TrainState, TrainState, TrainState, InfoDict]:
-    # optimizing critics
+    # optimizing critics 
+    # or not when optimizing alpha
+    # new_rng, new_critic, new_target_critic, critic_info = jax.lax.cond(
+    #     optimize_alpha,
+    #     _dummy_update,
+    #     _update_critic,
+    #     rng, task_id, actor, critic, target_critic, temp, batch, discount, tau
+    # )
     new_rng, new_critic, new_target_critic, critic_info = _update_critic(
-        rng, task_id, actor, critic, target_critic, temp, batch, discount, tau
+        rng, task_id, actor, critic, target_critic, update_target, temp, 
+        batch, discount, tau
     )
 
     # optimizing either alpha or theta
@@ -503,6 +542,7 @@ class CoTASPLearner(SACLearner):
         self.update_coef = update_coef
         self.actor_cfgs = actor_configs
         self.get_grad_masks = get_grad_masks_jit
+        self.target_update_period = target_update_period
         self.task_embeddings = []
         self.task_encoder = SentenceTransformer('all-MiniLM-L12-v2')
 
@@ -536,10 +576,16 @@ class CoTASPLearner(SACLearner):
 
         if not self.update_coef:
             optimize_alpha = False
+            
+        if self.step % self.target_update_period == 0:
+            update_target = True
+        else:
+            update_target = False
 
         new_rng, new_actor, new_temp, new_critic, new_target_critic, info = _update_cotasp_jit(
             self.rng, task_id, self.tau, self.discount, self.target_entropy, optimize_alpha, 
-            self.param_masks, self.actor, self.critic, self.target_critic, self.temp, batch
+            self.param_masks, self.actor, self.critic, self.target_critic, update_target,
+            self.temp, batch
         )
 
         self.step += 1
@@ -570,19 +616,18 @@ class CoTASPLearner(SACLearner):
             [key_temp])
 
         # re-initialize unused params of meta-policy network
-        new_rng, new_params = utils_fn.reset_free_params(
-            self.actor.params,
-            self.param_masks,
-            policies.MetaPolicy,
-            self.actor_cfgs,
-            [key_actor, self.dummy_o, jnp.array([0])],
-            adaptive_init=True
-        )
+        # new_rng, new_params = utils_fn.reset_free_params(
+        #     self.actor.params,
+        #     self.param_masks,
+        #     policies.MetaPolicy,
+        #     self.actor_cfgs,
+        #     [key_actor, self.dummy_o, jnp.array([0])],
+        #     adaptive_init=True
+        # )
         # re-initialize log_std_layer's params
         self.rng, new_params = utils_fn.reset_logstd_layer(
-            new_rng,
-            new_params,
-            self.actor_cfgs['final_fc_init_scale'],
+            key_actor,
+            self.actor.params,
             self.actor_cfgs['state_dependent_std']
         )
         self.actor = self.actor.update_params(new_params)

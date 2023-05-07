@@ -41,7 +41,7 @@ TASK_SEQS = {
     ],
     "cw2-test": [
         {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},
-        {'task': "stick-pull-v1", 'hint': 'Grasp a stick and pull a box with the stick.'}
+        {'task': "push-wall-v1", 'hint': 'Bypass a wall and push a puck to a goal.'}
     ],
     "cw2-ab-coffee-button": [
         {'task': "hammer-v1", 'hint': 'Hammer a screw on the wall.'},

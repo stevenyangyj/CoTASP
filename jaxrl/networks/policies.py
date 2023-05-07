@@ -13,14 +13,14 @@ tfd = tfp.distributions
 tfb = tfp.bijectors
 
 from jaxrl.networks.common import MLP, Params, PRNGKey, \
-    default_init, activation_fn, RMSNorm, identical_clip
+    default_init, activation_fn, RMSNorm
 
 # from common import MLP, Params, PRNGKey, default_init, \
 #     activation_fn, RMSNorm, create_mask, zero_grads
 
 
-LOG_STD_MAX = 2.0
-LOG_STD_MIN = -10.0
+LOG_STD_MAX = 5
+LOG_STD_MIN = -5
 
 
 class MSEPolicy(nn.Module):
@@ -104,7 +104,6 @@ class NormalTanhPolicy(nn.Module):
     hidden_dims: Sequence[int]
     action_dim: int
     name_activation: str = 'leaky_relu'
-    use_rms_norm: bool = False
     use_layer_norm: bool = False
     state_dependent_std: bool = True
     final_fc_init_scale: float = 1.0
@@ -164,7 +163,7 @@ def clip_fn(x):
 def f_jvp(primals, tangents):
     # Custom derivative rule for clip_fn 
     # x' = 1, when 0 < x < 1;
-    # x' = 0  otherwise.
+    # x' = 0, otherwise.
     x, = primals
     x_dot, = tangents
     ans = clip_fn(x)
@@ -179,6 +178,12 @@ def ste_step_fn(x):
     zero = clip_fn(x) - jax.lax.stop_gradient(clip_fn(x))
     return zero + jax.lax.stop_gradient(jnp.heaviside(x, 0))
 
+def sigma_activation(sigma, sigma_min=LOG_STD_MIN, sigma_max=LOG_STD_MAX):
+    return sigma_min + 0.5 * (sigma_max - sigma_min) * (jnp.tanh(sigma) + 1.)
+    
+def mu_activation(mu):
+    return jnp.tanh(mu)
+
 
 class MetaPolicy(nn.Module):
     hidden_dims: Sequence[int]
@@ -187,7 +192,6 @@ class MetaPolicy(nn.Module):
     state_dependent_std: bool = True
     name_activation: str = 'leaky_relu'
     use_layer_norm: bool = False
-    use_rms_norm: bool = False
     final_fc_init_scale: float = 1.0
     clip_mean: float = 1.0
     log_std_min: Optional[float] = None
@@ -195,9 +199,6 @@ class MetaPolicy(nn.Module):
     tanh_squash: bool = True
 
     def setup(self):
-        if self.use_layer_norm and self.use_rms_norm:
-            raise ValueError("use_layer_norm and use_rms_norm cannot both be true")
-
         self.backbones = [nn.Dense(hidn, kernel_init=default_init()) \
             for hidn in self.hidden_dims]
         self.embeds_bb = [nn.Embed(self.task_num, hidn, embedding_init=default_init()) \
@@ -211,25 +212,19 @@ class MetaPolicy(nn.Module):
         if self.state_dependent_std:
             self.log_std_layer = nn.Dense(
                 self.action_dim, 
-                kernel_init=default_init(self.final_fc_init_scale)
-            )
+                kernel_init=default_init(self.final_fc_init_scale),
+                use_bias=False)
         else:
             self.log_std_layer = self.param(
                 'log_std_layer', nn.initializers.zeros, 
                 (self.action_dim,)
             )
 
-        self.hard_tanh = lambda x: jnp.where(
-            x > self.clip_mean, self.clip_mean, 
-            jnp.where(x < -self.clip_mean, -self.clip_mean, x)
-        )
         self.activation = activation_fn(self.name_activation)
         if self.use_layer_norm:
-            self.normalizer = nn.LayerNorm(use_bias=False, use_scale=False)
-        elif self.use_rms_norm:
-            self.normalizer = RMSNorm(axis=1)
+            self.layer_norm = nn.LayerNorm(use_bias=False, use_scale=False)
         else:
-            self.normalizer = None
+            self.layer_norm = None
 
     def __call__(self,
                  x: jnp.ndarray,
@@ -242,19 +237,28 @@ class MetaPolicy(nn.Module):
             phi_l = ste_step_fn(self.embeds_bb[i](t))
             # masking outputs
             x *= jnp.broadcast_to(phi_l, x.shape)
-            # normalization
-            if i == 0 and (self.use_layer_norm or self.use_rms_norm):
-                x = self.normalizer(x)
-                x = nn.tanh(x)
+            # default normalization
+            # if i == 0 and self.use_layer_norm:
+            #     x = self.normalizer(x)
+            #     x = nn.tanh(x)
+            # else:
+            #     x = self.activation(x)
+            # layer-normalize each layer's output 
+            # except the last one
+            if self.use_layer_norm and (i + 1) < len(self.backbones):
+                x = self.layer_norm(x)
             else:
-                x = self.activation(x)
+                x = self.layer_norm(x)
+                x *= jnp.broadcast_to(phi_l, x.shape)
+            x = self.activation(x)
             masks[layer.name] = phi_l
         
         means = self.mean_layer(x)
 
         # Avoid numerical issues by limiting the mean of the Gaussian
         # to be in [-clip_mean, clip_mean]
-        means = self.hard_tanh(means)
+        # means = self.hard_tanh(means)
+        means = mu_activation(means) * self.clip_mean
 
         if self.state_dependent_std:
             log_stds = self.log_std_layer(x)
@@ -264,7 +268,8 @@ class MetaPolicy(nn.Module):
         # clip log_std
         log_std_min = self.log_std_min or LOG_STD_MIN
         log_std_max = self.log_std_max or LOG_STD_MAX
-        log_stds = jnp.clip(log_stds, log_std_min, log_std_max)
+        # log_stds = jnp.clip(log_stds, log_std_min, log_std_max)
+        log_stds = sigma_activation(log_stds, log_std_min, log_std_max)
         
         # numerically unstable method for unbounded means
         # base_dist = tfd.MultivariateNormalDiag(loc=means,
@@ -384,8 +389,7 @@ if __name__ == "__main__":
         action_dim=4,
         task_num=20,
         state_dependent_std=False,
-        use_layer_norm=False,
-        use_rms_norm=False)
+        use_layer_norm=False)
     
     rng, key = random.split(random.PRNGKey(0))
     variables = actor.init(

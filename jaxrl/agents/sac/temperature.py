@@ -7,6 +7,13 @@ from flax import linen as nn
 from jaxrl.networks.common import InfoDict, TrainState
 
 
+LOG_TEMP_MAX = 5.0
+LOG_TEMP_MIN = -10.0
+
+def temp_activation(temp, temp_min=LOG_TEMP_MIN, temp_max=LOG_TEMP_MAX):
+    return temp_min + 0.5 * (temp_max - temp_min) * (jnp.tanh(temp) + 1.)
+
+
 class Temperature(nn.Module):
     init_log_temp: float = 1.0
 
@@ -15,7 +22,7 @@ class Temperature(nn.Module):
         log_temp = self.param('log_temp',
                               init_fn=lambda key: jnp.full(
                                   (), self.init_log_temp))
-        return jnp.exp(log_temp)
+        return jnp.exp(temp_activation(log_temp))
 
 
 def update(temp: TrainState, entropy: float,
