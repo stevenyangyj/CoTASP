@@ -1,5 +1,5 @@
 # CoTASP
-Code for "Continual Task Allocation in Meta-Policy Network via Sparse Prompting", presented in ICML 2023.
+Code for "**Co**ntinual **T**ask **A**llocation in Meta-Policy Network via **S**parse **P**rompting", presented in ICML 2023.
 
 ## Key Dependencies
 ```console
