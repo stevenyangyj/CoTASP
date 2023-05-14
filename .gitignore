@@ -11,7 +11,7 @@ logs/
 *.pdf
 
 # Ignore all files in the 'configs' subfolder.
-configs/
+# configs/
 
 # Distribution / packaging
 .Python

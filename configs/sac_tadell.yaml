@@ -1,0 +1,41 @@
+actor_configs:
+  clip_mean: 2.0
+  final_fc_init_scale: 0.001
+  hidden_dims: !!python/tuple
+  - 256
+  - 256
+  - 256
+  name_activation: leaky_relu
+  state_dependent_std: true
+  use_layer_norm: true
+critic_configs:
+  hidden_dims: !!python/tuple
+  - 256
+  - 256
+  - 256
+  name_activation: leaky_relu
+  use_layer_norm: true
+dict_configs:
+  alpha: 0.001
+  c: 1.0
+  method: lasso_lars
+  positive_code: false
+  scale_code: false
+init_temperature: 1.0
+pi_opt_configs:
+  clip_method: global_clip
+  lr: 0.0003
+  max_norm: 1.0
+  optim_algo: adam
+q_opt_configs:
+  clip_method: global_clip
+  lr: 0.0003
+  max_norm: 1.0
+  optim_algo: adam
+t_opt_configs:
+  clip_method: none
+  lr: 0.0003
+  max_norm: -1
+  optim_algo: adam
+target_entropy: -2.0
+tau: 0.005
