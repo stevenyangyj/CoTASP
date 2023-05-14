@@ -17,8 +17,8 @@ from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string('env_name', "cw2-ab-button-press", 'Environment name.')
-flags.DEFINE_string('save_dir', '', 'Tensorboard logging dir.')
+flags.DEFINE_string('env_name', "cw2-test", 'Environment name.')
+flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/CoTASP/logs', 'Tensorboard logging dir.')
 flags.DEFINE_integer('seed', 7409, 'Random seed.')
 flags.DEFINE_string('base_algo', 'tadell', 'base learning algorithm')
 
@@ -31,13 +31,13 @@ flags.DEFINE_integer('log_interval', 1000, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
 flags.DEFINE_integer('batch_size', 256, 'Mini batch size.')
 flags.DEFINE_integer('updates_per_step', 1, 'Gradient updates per step.')
-flags.DEFINE_integer('max_steps', int(1e6), 'Number of training steps for each task')
+flags.DEFINE_integer('max_steps', int(2e4), 'Number of training steps for each task')
 flags.DEFINE_integer('start_training', int(1e4), 'Number of training steps to start training.')
 
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 
 flags.DEFINE_boolean('tqdm', False, 'Use tqdm progress bar.')
-flags.DEFINE_string('wandb_mode', 'online', 'Track experiments with Weights and Biases.')
+flags.DEFINE_string('wandb_mode', 'disabled', 'Track experiments with Weights and Biases.')
 flags.DEFINE_string('wandb_project_name', "jaxrl_tadell", "The wandb's project name.")
 flags.DEFINE_string('wandb_entity', None, "the entity (team) of wandb's project")
 # YAML file path to tadell's hyperparameter configuration

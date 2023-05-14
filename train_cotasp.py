@@ -20,36 +20,32 @@ from jaxrl.agents.sac.sac_learner import CoTASPLearner
 from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
-
 flags.DEFINE_string('env_name', 'cw20', 'Environment name.')
-flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/CoTASP/logs', 'Logging dir.')
-flags.DEFINE_integer('seed', 60, 'Random seed.')
+flags.DEFINE_integer('seed', 68, 'Random seed.')
 flags.DEFINE_string('base_algo', 'cotasp', 'base learning algorithm')
-
-flags.DEFINE_boolean('ablation', False, 'Ablation study')
-flags.DEFINE_boolean('save_checkpoint', False, 'Save meta-policy network parameters')
 
 flags.DEFINE_string('env_type', 'random_init_all', 'The type of env is either deterministic or random_init_all')
 flags.DEFINE_boolean('normalize_reward', False, 'Normalize rewards')
 flags.DEFINE_integer('eval_episodes', 10, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 200, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
-flags.DEFINE_integer('batch_size', 256, 'Mini batch size.')
+flags.DEFINE_integer('batch_size', 128, 'Mini batch size.')
 flags.DEFINE_integer('updates_per_step', 1, 'Gradient updating per # environment steps.')
-flags.DEFINE_integer('max_step', int(5e5), 'Number of training steps for each task')
+flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
+flags.DEFINE_integer('max_step', int(1e6), 'Number of training steps for each task')
 flags.DEFINE_integer('start_training', int(1e4), 'Number of training steps to start training.')
 flags.DEFINE_integer('theta_step', int(990), 'Number of training steps for theta.')
 flags.DEFINE_integer('alpha_step', int(10), 'Number of finetune steps for alpha.')
 
-flags.DEFINE_integer('reset_interval', int(2.5e5), 'Periodicity of resets.')
-flags.DEFINE_boolean('resets', False, 'Periodically reset the agent networks.')
-
-flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
+flags.DEFINE_boolean('rnd_explore', True, 'random policy distillation')
+flags.DEFINE_integer('distill_steps', int(2e4), 'distillation steps')
 
 flags.DEFINE_boolean('tqdm', False, 'Use tqdm progress bar.')
 flags.DEFINE_string('wandb_mode', 'online', 'Track experiments with Weights and Biases.')
-flags.DEFINE_string('wandb_project_name', "jaxrl_cotasp", "The wandb's project name.")
+flags.DEFINE_string('wandb_project_name', "CoTASP_ContiWorld", "The wandb's project name.")
 flags.DEFINE_string('wandb_entity', None, "the entity (team) of wandb's project")
+flags.DEFINE_boolean('save_checkpoint', False, 'Save meta-policy network parameters')
+flags.DEFINE_string('save_dir', '/home/yijunyan/Data/PyCode/CoTASP/logs', 'Logging dir.')
 
 # YAML file path to cotasp's hyperparameter configuration
 with open('configs/sac_cotasp.yaml', 'r') as file:
@@ -60,7 +56,6 @@ config_flags.DEFINE_config_dict(
     'Training hyperparameter configuration.',
     lock_config=False
 )
-
 
 def main(_):
     # config tasks
@@ -109,115 +104,118 @@ def main(_):
         del temp_env
     else:
         raise NotImplementedError()
-
-    # continual learning loop
+    
+    '''
+    continual learning loop
+    '''
     eval_envs = []
     for idx, dict_task in enumerate(seq_tasks):
-        # only for ablation study
-        if idx == 0 and FLAGS.ablation:
-            eval_seed = 56
-        else:
-            eval_seed = FLAGS.seed
-        eval_envs.append(get_single_env(dict_task['task'], eval_seed, randomization=FLAGS.env_type))
+        eval_envs.append(get_single_env(dict_task['task'], FLAGS.seed, randomization=FLAGS.env_type))
 
     total_env_steps = 0
     for task_idx, dict_task in enumerate(seq_tasks):
-
-        # only for ablation study
-        if task_idx == 0 and FLAGS.ablation:
-            agent.freeze_task_params(task_idx)
-        else:
-            print(f'Learning on task {task_idx+1}: {dict_task["task"]} for {FLAGS.max_step} steps')
-
+        
+        '''
+        Learning subroutine for the current task
+        '''
+        print(f'Learning on task {task_idx+1}: {dict_task["task"]} for {FLAGS.max_step} steps')
+        # start the current task
+        agent.start_task(task_idx, dict_task["hint"])
+        
+        if task_idx > 0 and FLAGS.rnd_explore:
             '''
-            Learning subroutine for the current task
+            (Optional) Rand policy distillation for better exploration in the initial stage
             '''
-            # start the current task
-            agent.start_task(task_idx, dict_task["hint"])
+            for i in range(FLAGS.distill_steps):
+                batch = replay_buffer.sample(FLAGS.batch_size)
+                distill_info = agent.rand_net_distill(task_idx, batch)
+                
+                if i % (FLAGS.distill_steps // 10) == 0:
+                    print(i, distill_info)
+            # reset actor's optimizer
+            agent.reset_actor_optimizer()
 
-            # set continual world environment
-            env = get_single_env(
-                dict_task['task'], FLAGS.seed, randomization=FLAGS.env_type, 
-                normalize_reward=FLAGS.normalize_reward
+        # set continual world environment
+        env = get_single_env(
+            dict_task['task'], FLAGS.seed, randomization=FLAGS.env_type, 
+            normalize_reward=FLAGS.normalize_reward
+        )
+        # reset replay buffer
+        replay_buffer = ReplayBuffer(
+            env.observation_space, env.action_space, FLAGS.buffer_size or FLAGS.max_step
+        )
+        # reset environment
+        observation, done = env.reset(), False
+        for idx, optimize_alpha in enumerate(
+            itertools.islice(
+                itertools.cycle([False]*FLAGS.theta_step + [True]*FLAGS.alpha_step), FLAGS.max_step
             )
-
-            # reset replay buffer
-            replay_buffer = ReplayBuffer(
-                env.observation_space, env.action_space, FLAGS.buffer_size or FLAGS.max_step
-            )
-
-            observation, done = env.reset(), False
-            for idx, optimize_alpha in enumerate(
-                itertools.islice(
-                    itertools.cycle([False]*FLAGS.theta_step + [True]*FLAGS.alpha_step), FLAGS.max_step
-                )
-            ):
-                # i = idx + 1
-                if idx < FLAGS.start_training:
-                    # initial exploration strategy proposed in ClonEX-SAC
-                    # if task_idx == 0:
-                    #     action = env.action_space.sample()
-                    # else:
-                    #     # uniform-previous strategy
-                    #     mask_id = np.random.choice(task_idx)
-                    #     action = agent.sample_actions(observation[np.newaxis], mask_id)
-                    #     action = np.asarray(action, dtype=np.float32).flatten()
-                    
-                    # default initial exploration strategy
+        ):
+            if idx < FLAGS.start_training:
+                # initial exploration strategy proposed in ClonEX-SAC
+                if task_idx == 0:
                     action = env.action_space.sample()
                 else:
-                    action = agent.sample_actions(observation[np.newaxis], task_idx)
+                    # uniform-previous strategy
+                    mask_id = np.random.choice(task_idx)
+                    action = agent.sample_actions(observation[np.newaxis], mask_id)
                     action = np.asarray(action, dtype=np.float32).flatten()
-                next_observation, reward, done, info = env.step(action)
-                # counting total environment step
-                total_env_steps += 1
+                
+                # default initial exploration strategy
+                # action = env.action_space.sample()
+            else:
+                action = agent.sample_actions(observation[np.newaxis], task_idx)
+                action = np.asarray(action, dtype=np.float32).flatten()
+                
+            next_observation, reward, done, info = env.step(action)
+            # counting total environment step
+            total_env_steps += 1
 
-                if not done or 'TimeLimit.truncated' in info:
-                    mask = 1.0
-                else:
-                    mask = 0.0
+            if not done or 'TimeLimit.truncated' in info:
+                mask = 1.0
+            else:
+                mask = 0.0
+            # only for meta-world
+            assert mask == 1.0
 
-                # only for meta-world
-                assert mask == 1.0
+            replay_buffer.insert(
+                observation, action, reward, mask, float(done), next_observation
+            )
+            
+            # CRUCIAL step easy to overlook
+            observation = next_observation
 
-                replay_buffer.insert(observation, action, reward, mask, float(done),
-                                    next_observation)
-                observation = next_observation
+            if done:
+                # EPISODIC ending
+                observation, done = env.reset(), False
+                for k, v in info['episode'].items():
+                    wandb.log({f'training/{k}': v, 'global_steps': total_env_steps})
 
-                if done:
-                    observation, done = env.reset(), False
-                    for k, v in info['episode'].items():
+            if (idx >= FLAGS.start_training) and (idx % FLAGS.updates_per_step == 0):
+                for _ in range(FLAGS.updates_per_step):
+                    batch = replay_buffer.sample(FLAGS.batch_size)
+                    update_info = agent.update(task_idx, batch, optimize_alpha)
+                if idx % FLAGS.log_interval == 0:
+                    for k, v in update_info.items():
                         wandb.log({f'training/{k}': v, 'global_steps': total_env_steps})
 
-                if (idx >= FLAGS.start_training) and (idx % FLAGS.updates_per_step == 0):
-                    for _ in range(FLAGS.updates_per_step):
-                        batch = replay_buffer.sample(FLAGS.batch_size)
-                        update_info = agent.update(task_idx, batch, optimize_alpha)
-                    if idx % FLAGS.log_interval == 0:
-                        for k, v in update_info.items():
-                            wandb.log({f'training/{k}': v, 'global_steps': total_env_steps})
+            if idx % FLAGS.eval_interval == 0:
+                eval_stats = evaluate_cl(agent, eval_envs, FLAGS.eval_episodes)
 
-                if idx % FLAGS.eval_interval == 0:
-                    eval_stats = evaluate_cl(agent, eval_envs, FLAGS.eval_episodes)
+                for k, v in eval_stats.items():
+                    wandb.log({f'evaluation/{k}': v, 'global_steps': total_env_steps})
 
-                    for k, v in eval_stats.items():
-                        wandb.log({f'evaluation/{k}': v, 'global_steps': total_env_steps})
-
-                    # Update the log with collected data
-                    eval_stats['cl_method'] = algo
-                    eval_stats['x'] = total_env_steps
-                    eval_stats['steps_per_task'] = FLAGS.max_step
-                    log.update(eval_stats)
-                
-                if FLAGS.resets and idx % FLAGS.reset_interval == 0 and idx < FLAGS.max_step:
-                    # resetting trick
-                    agent.reset_agent()
-        
-            '''
-            Updating miscellaneous things
-            '''
-            print('End the current task')
-            dict_stats = agent.end_task(task_idx, save_policy_dir, save_dict_dir)
+                # Update the log with collected data
+                eval_stats['cl_method'] = algo
+                eval_stats['x'] = total_env_steps
+                eval_stats['steps_per_task'] = FLAGS.max_step
+                log.update(eval_stats)
+    
+        '''
+        Updating miscellaneous things
+        '''
+        print('End of the current task')
+        dict_stats = agent.end_task(task_idx, save_policy_dir, save_dict_dir)
 
     # save log data
     log.save()

@@ -1,5 +1,5 @@
 import os
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union, Iterable
 
 import numpy as np
 import flax
@@ -10,6 +10,7 @@ import optax
 from jax.tree_util import tree_map
 from jax import custom_jvp
 from flax.core import freeze, unfreeze, FrozenDict
+from flax.linen.dtypes import canonicalize_dtype
 from flax import traverse_util
 from flax import struct
 from flax import core
@@ -21,7 +22,9 @@ PRNGKey = Any
 Params = flax.core.FrozenDict[str, Any]
 PRNGKey = Any
 Shape = Sequence[int]
+Array = Any
 Dtype = Any  # this could be a real type?
+Axes = Union[int, Any]
 InfoDict = Dict[str, float]
 
 
@@ -31,7 +34,7 @@ def default_init(scale: Optional[float] = 1.0):
 
 def activation_fn(name: str = 'lrelu'):
     assert name in ['relu', 'tanh', 'leaky_relu', 'swish', 'elu',
-                    'gelu', 'selu', 'celu', 'hard_tanh']
+                    'gelu', 'selu', 'silu', 'celu', 'hard_tanh']
     if name == 'relu':
         act_fn = nn.relu
     elif name == 'tanh':
@@ -46,6 +49,8 @@ def activation_fn(name: str = 'lrelu'):
         act_fn = jax.nn.gelu
     elif name == 'selu':
         act_fn = jax.nn.selu
+    elif name == 'silu':
+        act_fn = jax.nn.silu
     elif name == 'celu':
         act_fn = jax.nn.celu
     elif name == 'hard_tanh':
@@ -128,23 +133,23 @@ def reset_model(main_cls, model_cls, configs: dict, inputs: list):
 
 
 def reset_logstd_layer(
-    rng: PRNGKey, pi_params: Params, state_dependent_std: bool):
-
+    rng: PRNGKey, pi_params: Params, 
+    final_fc_init_scale: float, state_dependent_std: bool):
+    
     params_actor = unfreeze(pi_params)
     if state_dependent_std:
         kernel = params_actor['log_std_layer']['kernel']
+        bias = params_actor['log_std_layer']['bias']
 
-        rng, key_kernel = jax.random.split(rng)
-        # init_kernel = default_init(final_fc_init_scale)(key, kernel.shape)
-        # init_bias = nn.initializers.zeros_init()(key, bias.shape)
-        
-        # NISPA's re-initializing strategy
-        init_kernel = jnp.mean(key_kernel) + jax.random.normal(
-            key_kernel, shape=kernel.shape) * jnp.std(kernel)
+        rng, key = jax.random.split(rng)
+        init_kernel = default_init(final_fc_init_scale)(key, kernel.shape)
+        init_bias = nn.initializers.zeros_init()(key, bias.shape)
 
         params_actor['log_std_layer']['kernel'] = init_kernel
+        params_actor['log_std_layer']['bias'] = init_bias
     else:
         params_actor['log_std_layer'] = jnp.zeros_like(params_actor['log_std_layer'])
+        
     return rng, freeze(params_actor)
 
 
@@ -171,33 +176,15 @@ def reset_free_params(
                 cursor = cursor[key]
                 target = target[key]
             rng, rnd_key = jax.random.split(rng)
-            # if path[-1] == 'kernel':
-                # previous rescale strategy
-                # if path[0] == 'mean_layer':
-                #     scale = jnp.mean(value) * configs['final_fc_init_scale']
-                # else:
-                #     scale = jnp.mean(value)
-                # cursor[path[-1]] = default_init(scale)(rnd_key, value.shape)
-                
-                # new rescale strategy
-                # if path[0] == 'mean_layer':
-                #     cursor[path[-1]] = default_init(configs['final_fc_init_scale'])(rnd_key, value.shape)
-                # else:
-                #     cursor[path[-1]] = default_init()(rnd_key, value.shape)
-                # cursor[path[-1]] /= jnp.mean(value)
-            # elif path[-1] == 'bias':
-            #     cursor[path[-1]] = nn.initializers.zeros_init()(rnd_key, value.shape)
-            # else:
-            #     raise NotImplementedError
-            
+    
             # NISPA's re-initializing strategy
             target = target[path[-1]]
             if path[-1] == 'kernel':
                 init_mean = jnp.mean(target[target * (1 - value) != 0])
                 init_std = jnp.std(target[target * (1 - value) != 0])
                 print(path, init_mean, init_std)
-                cursor[path[-1]] = init_mean + jax.random.normal(
-                    rnd_key, shape=value.shape) * init_std
+                cursor[path[-1]] = init_mean + jax.random.truncated_normal(
+                    rnd_key, -2, 2, shape=value.shape) * init_std
             elif path[-1] == 'bias':
                 cursor[path[-1]] = nn.initializers.zeros_init()(rnd_key, target.shape)
             else:
@@ -250,7 +237,7 @@ def set_optimizer(
         minimizer = optax.chain(
             optax.adaptive_grad_clip(max_norm),
             optimizer)
-    elif max_norm == -1.0:
+    elif max_norm == -1:
         minimizer = optimizer
     else:
         raise NotImplementedError
@@ -272,6 +259,134 @@ def f_jvp(primals, tangents):
     ans = identical_clip(x, a_min, a_max)
     ans_dot = jnp.ones_like(x) * x_dot
     return ans, ans_dot
+
+
+def _canonicalize_axes(rank: int, axes: Axes) -> Tuple[int, ...]:
+    """Returns a tuple of deduplicated, sorted, and positive axes."""
+    if not isinstance(axes, Iterable):
+        axes = (axes,)
+    return tuple(set([rank + axis if axis < 0 else axis for axis in axes]))
+
+
+def _normalize(mdl: nn.Module, x: Array, mean: Array, var: Array,
+               reduction_axes: Axes, feature_axes: Axes,
+               dtype: Dtype, param_dtype: Dtype,
+               epsilon: float,
+               use_bias: bool, use_scale: bool,
+               bias_init: Callable[[PRNGKey, Shape, Dtype], Array],
+               scale_init: Callable[[PRNGKey, Shape, Dtype], Array]):
+    """"Normalizes the input of a normalization layer and optionally applies a learned scale and bias.
+
+    Arguments:
+    mdl: Module to apply the normalization in (normalization params will reside
+        in this module).
+    x: The input.
+    mean: Mean to use for normalization.
+    var: Variance to use for normalization.
+    reduction_axes: The axes in ``x`` to reduce.
+    feature_axes: Axes containing features. A separate bias and scale is learned
+        for each specified feature.
+    dtype: The dtype of the result (default: infer from input and params).
+    param_dtype: The dtype of the parameters.
+    epsilon: Normalization epsilon.
+    use_bias: If true, add a bias term to the output.
+    use_scale: If true, scale the output.
+    bias_init: Initialization function for the bias term.
+    scale_init: Initialization function for the scaling function.
+
+    Returns:
+    The normalized input.
+    """
+    reduction_axes = _canonicalize_axes(x.ndim, reduction_axes)
+    feature_axes = _canonicalize_axes(x.ndim, feature_axes)
+    stats_shape = list(x.shape)
+    for axis in reduction_axes:
+        stats_shape[axis] = 1 
+    mean = mean.reshape(stats_shape)
+    var = var.reshape(stats_shape)
+    feature_shape = [1] * x.ndim
+    reduced_feature_shape = []
+    for ax in feature_axes:
+        feature_shape[ax] = x.shape[ax] 
+        reduced_feature_shape.append(x.shape[ax]) 
+    y = x - mean
+    mul = jax.lax.rsqrt(var + epsilon)
+    args = [x]
+    if use_scale:
+        scale = mdl.param('scale', scale_init, reduced_feature_shape, 
+                            param_dtype).reshape(feature_shape) 
+        mul *= scale 
+        args.append(scale) 
+    y *= mul
+    if use_bias:
+        bias = mdl.param('bias', bias_init, reduced_feature_shape,
+                            param_dtype).reshape(feature_shape) 
+        y += bias 
+        args.append(bias)
+    dtype = canonicalize_dtype(*args, dtype=dtype)
+    return jnp.asarray(y, dtype)
+
+
+class MaskedLayerNorm(nn.Module):
+    """Layer normalization (https://arxiv.org/abs/1607.06450).
+
+    LayerNorm normalizes the activations of the layer for each given example in a
+    batch independently, rather than across a batch like Batch Normalization.
+    i.e. applies a transformation that maintains the mean activation within
+    each example close to 0 and the activation standard deviation close to 1.
+
+    Attributes:
+    epsilon: A small float added to variance to avoid dividing by zero.
+    dtype: the dtype of the result (default: infer from input and params).
+    param_dtype: the dtype passed to parameter initializers (default: float32).
+    use_bias:  If True, bias (beta) is added.
+    use_scale: If True, multiply by scale (gamma). When the next layer is linear
+        (also e.g. nn.relu), this can be disabled since the scaling will be done
+        by the next layer.
+    bias_init: Initializer for bias, by default, zero.
+    scale_init: Initializer for scale, by default, one.
+    reduction_axes: Axes for computing normalization statistics.
+    feature_axes: Feature axes for learned bias and scaling.
+    axis_name: the axis name used to combine batch statistics from multiple
+        devices. See `jax.pmap` for a description of axis names (default: None).
+        This is only needed if the model is subdivided across devices, i.e. the
+        array being normalized is sharded across devices within a pmap.
+    axis_index_groups: groups of axis indices within that named axis
+        representing subsets of devices to reduce over (default: None). For
+        example, `[[0, 1], [2, 3]]` would independently batch-normalize over
+        the examples on the first two and last two devices. See `jax.lax.psum`
+        for more details.
+    """
+    epsilon: float = 1e-6
+    dtype: Optional[Dtype] = None
+    param_dtype: Dtype = jnp.float32
+    use_bias: bool = True
+    use_scale: bool = True
+    bias_init: Callable[[PRNGKey, Shape, Dtype], Any] = nn.initializers.zeros
+    scale_init: Callable[[PRNGKey, Shape, Dtype], Any] = nn.initializers.ones
+    reduction_axes: Axes = -1
+    feature_axes: Axes = -1
+    axis_name: Optional[str] = None
+    axis_index_groups: Any = None
+
+    @nn.compact
+    def __call__(self, x, masks):
+        """Applies layer normalization on the input.
+
+        Args:
+            x: the inputs
+
+        Returns:
+            Normalized inputs (the same shape as inputs).
+        """
+        mean = jnp.mean(x, axis=self.reduction_axes, keepdims=True, where=masks)
+        var = jnp.var(x, axis=self.reduction_axes, keepdims=True, where=masks)
+
+        return _normalize(
+            self, x, mean, var, self.reduction_axes, self.feature_axes,
+            self.dtype, self.param_dtype, self.epsilon,
+            self.use_bias, self.use_scale,
+            self.bias_init, self.scale_init) * masks
 
 
 class RMSNorm(nn.Module):
@@ -414,7 +529,7 @@ class TrainState(struct.PyTreeNode):
 
 
 class MPNTrainState(struct.PyTreeNode):
-    # Simple train state allowing alternate optimization.
+    # A simple train state allowing alternate optimization.
 
     step: int
     apply_fn: Callable = struct.field(pytree_node=False)

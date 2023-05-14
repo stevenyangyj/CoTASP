@@ -390,25 +390,6 @@ class OnlineDictLearnerV2(object):
         assert self._positive_code
         return alpha_scaled * self.factor
 
-    def _compute_sim_matrix(self, mat: np.ndarray):
-        assert np.all(self.C.shape == mat.shape)
-        dist_matrix = spatial.distance_matrix(self.C, mat)
-
-        # compute similarity matrix
-        dist_matrix -= np.min(dist_matrix)
-        dist_matrix /= np.max(dist_matrix)
-        simi_matrix = 1 - dist_matrix
-
-        return simi_matrix
-
-    def _compute_corr_matrix(self, pre=True):
-        if pre:
-            corr_matrix = cosine_similarity(self.arch_code)
-        else:
-            corr_matrix = cosine_similarity(self.C)
-
-        return corr_matrix
-
     def _compute_overlapping(self):
         binary_masks = np.heaviside(self.arch_code, 0)
         overlap_mat = np.empty((binary_masks.shape[0], binary_masks.shape[0]))
@@ -443,8 +424,6 @@ class OnlineDictLearnerV2(object):
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from sentence_transformers import SentenceTransformer
-
-    from plot_utils import heatmap, annotate_heatmap
 
     model = SentenceTransformer('all-MiniLM-L12-v2')
 
@@ -506,33 +485,4 @@ if __name__ == "__main__":
 
         # online update dictionary via CD
         dict_learner.update_dict(code, task_embedding[np.newaxis, :])
-
-    # print(dict_learner._compute_corr_matrix(pre=True))
-    # print(dict_learner.change_of_dict)
-    # mimic testing stage
-    # res_code = []
-    # for idx, hint_task in enumerate(hints):
-    #     print(idx+1, hint_task)
-    #     task_embedding = model.encode(hint_task)
-    #     # compute code for current task
-    #     code = dict_learner.get_code(task_embedding[np.newaxis, :])
-    #     res_code.append(code)
-    # testing_code = np.vstack(res_code)
-
-    # plot similarity / correlation
-    # mat = dict_learner._compute_sim_matrix(testing_code)
-    # mat = dict_learner._compute_corr_matrix()
-    # mat = dict_learner._compute_overlapping()
-
-    # fig, ax = plt.subplots(figsize=(7, 5)) # 10: (7, 5), 20: (12, 8)
-
-    # # YlGn, 
-    # im, cbar = heatmap(mat, task_idx, task_idx, ax=ax,
-    #                 cmap="Blues", font_label={'size': 12},
-    #                 x_label='', y_label='', 
-    #                 cbarlabel="Prompt Similarity")
-    # texts = annotate_heatmap(im, valfmt="{x:.1f}")
-
-    # # fig.tight_layout()
-    # plt.savefig('overlap_cw10.svg', bbox_inches='tight', pad_inches=0.02)
     

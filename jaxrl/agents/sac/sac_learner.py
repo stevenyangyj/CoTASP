@@ -62,7 +62,9 @@ class SACLearner(object):
                  seed: int,
                  observations: jnp.ndarray,
                  actions: jnp.ndarray,
-                 optim_configs: dict = {},
+                 pi_opt_configs: dict = {},
+                 q_opt_configs: dict = {},
+                 t_opt_configs: dict = {},
                  actor_configs: dict = {},
                  critic_configs: dict = {},
                  discount: float = 0.99,
@@ -93,7 +95,7 @@ class SACLearner(object):
         actor = TrainState.create(
             apply_fn=actor_def.apply,
             params=actor_params,
-            tx=utils_fn.set_optimizer(**optim_configs)
+            tx=utils_fn.set_optimizer(**pi_opt_configs)
         )
 
         critic_def = critic_net.DoubleCritic(**critic_configs)
@@ -103,7 +105,7 @@ class SACLearner(object):
         critic = TrainState.create(
             apply_fn=critic_def.apply,
             params=critic_params,
-            tx=utils_fn.set_optimizer(**optim_configs)
+            tx=utils_fn.set_optimizer(**q_opt_configs)
         )
 
         tc_def = critic_net.DoubleCritic(**critic_configs)
@@ -113,18 +115,15 @@ class SACLearner(object):
         target_critic = TrainState.create(
             apply_fn=tc_def.apply,
             params=tc_params,
-            tx=utils_fn.set_optimizer(**optim_configs)
+            tx=utils_fn.set_optimizer(**q_opt_configs)
         )
 
-        # opt_kwargs_temp = deepcopy(optim_configs)
-        # opt_kwargs_temp['max_norm'] = -1.0
-        # opt_kwargs_temp['clip_method'] = None
         temp_def = temperature.Temperature(init_temperature)
         _, temp_params = temp_def.init(temp_key).pop('params')
         temp = TrainState.create(
             apply_fn=temp_def.apply,
             params=temp_params,
-            tx=utils_fn.set_optimizer(**optim_configs)
+            tx=utils_fn.set_optimizer(**t_opt_configs)
         )
 
         self.actor = actor
@@ -207,18 +206,19 @@ class SACLearner(object):
 
 @jax.jit
 def _sample_actions(
-        rng: PRNGKey,
-        actor: MPNTrainState,
-        observations: np.ndarray,
-        task_i: jnp.ndarray,
-        temperature: float = 1.0) -> Tuple[PRNGKey, jnp.ndarray, dict]:
+    rng: PRNGKey,
+    actor: MPNTrainState,
+    observations: np.ndarray,
+    task_i: jnp.ndarray,
+    temperature: float = 1.0
+    ) -> Tuple[PRNGKey, jnp.ndarray, dict]:
+    
     rng, key = jax.random.split(rng)
     dist, dicts = actor(
         observations,
         task_i,
         temperature
     )
-
     return rng, dist.sample(seed=key), dicts
 
 
@@ -287,15 +287,15 @@ def _update_alpha(
     # grads_actor = tree_map(global_clip_fn, grads_actor)
 
     # Masking gradients according to cumulative binary masks
-    unfrozen_grads = unfreeze(grads_actor)
-    for path, value in param_mask.items():
-        cursor = unfrozen_grads
-        for key in path[:-1]:
-            if key in cursor:
-                cursor = cursor[key]
-        cursor[path[-1]] *= value
+    # unfrozen_grads = unfreeze(grads_actor)
+    # for path, value in param_mask.items():
+    #     cursor = unfrozen_grads
+    #     for key in path[:-1]:
+    #         if key in cursor:
+    #             cursor = cursor[key]
+    #     cursor[path[-1]] *= value
     
-    actor_info['masked_g_norm_actor'] = global_norm(unfrozen_grads)
+    # actor_info['masked_g_norm_actor'] = global_norm(unfrozen_grads)
 
     # only update coefficients (alpha)
     new_actor = actor.apply_grads_alpha(grads=grads_actor)
@@ -352,7 +352,7 @@ def _update_theta(
                 cursor = cursor[key]
         cursor[path[-1]] *= value
 
-    actor_info['masked_g_norm_actor'] = global_norm(unfrozen_grads)
+    # actor_info['masked_g_norm_actor'] = global_norm(unfrozen_grads)
     
     # only update policy parameters (theta)
     new_actor = actor.apply_grads_theta(grads=freeze(unfrozen_grads))
@@ -413,18 +413,41 @@ def _update_critic(
     return rng, new_critic, new_target_critic, critic_info
 
 
-def _dummy_update(
-    rng: PRNGKey, task_id: int, actor: MPNTrainState, critic: TrainState, 
-    target_critic: TrainState, temp: TrainState, batch: Batch, discount: float, 
-    tau: float) -> Tuple[PRNGKey, TrainState, TrainState, InfoDict]:
+@jax.jit
+def _rand_net_distill(
+    rng: PRNGKey, task_id: int, param_mask: FrozenDict[str, Any], 
+    actor: MPNTrainState, batch: Batch) -> Tuple[PRNGKey, MPNTrainState, InfoDict]:
     
     rng, _ = jax.random.split(rng)
-    critic_info = {'critic_loss': jnp.array(0, dtype=jnp.float32),
-                   'q1': jnp.array(0, dtype=jnp.float32),
-                   'q2': jnp.array(0, dtype=jnp.float32),
-                   'g_norm_critic': jnp.array(0, dtype=jnp.float32)}
+    def distill_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
+        _, dict = actor.apply_fn(
+            {'params': actor_params}, batch.observations, jnp.array([task_id])
+        )
+        means, std = dict['means'], dict['stddev']
+        tar_means, tar_std = jnp.zeros_like(means), jnp.ones_like(std)
+        # KL-divergence between two Gaussians 
+        actor_loss = -0.5 + (jnp.log(tar_std / std) + (std**2 + (means - tar_means)**2) / (2 * tar_std**2)).mean()
+
+        _info = {
+            'rnd_loss': actor_loss
+        }
+        return actor_loss, _info
     
-    return rng, critic, target_critic, critic_info
+    # grads of actor
+    grads_actor, actor_info = jax.grad(distill_loss_fn, has_aux=True)(actor.params)
+
+    # Masking gradients according to cumulative binary masks
+    unfrozen_grads = unfreeze(grads_actor)
+    for path, value in param_mask.items():
+        cursor = unfrozen_grads
+        for key in path[:-1]:
+            if key in cursor:
+                cursor = cursor[key]
+        cursor[path[-1]] *= value
+    
+    # only update policy parameters (theta)
+    new_actor = actor.apply_grads_theta(grads=freeze(unfrozen_grads))
+    return rng, new_actor, actor_info
 
 
 @functools.partial(jax.jit, static_argnames=('update_target'))
@@ -434,13 +457,6 @@ def _update_cotasp_jit(rng: PRNGKey, task_id: int, tau: float, discount: float,
     update_target, temp: TrainState, batch: Batch
     ) -> Tuple[PRNGKey, MPNTrainState, TrainState, TrainState, TrainState, InfoDict]:
     # optimizing critics 
-    # or not when optimizing alpha
-    # new_rng, new_critic, new_target_critic, critic_info = jax.lax.cond(
-    #     optimize_alpha,
-    #     _dummy_update,
-    #     _update_critic,
-    #     rng, task_id, actor, critic, target_critic, temp, batch, discount, tau
-    # )
     new_rng, new_critic, new_target_critic, critic_info = _update_critic(
         rng, task_id, actor, critic, target_critic, update_target, temp, 
         batch, discount, tau
@@ -478,7 +494,9 @@ class CoTASPLearner(SACLearner):
         update_dict = True,
         update_coef = True,
         dict_configs: dict = {},
-        optim_configs: dict = {},
+        pi_opt_configs: dict = {},
+        q_opt_configs: dict = {},
+        t_opt_configs: dict = {},
         actor_configs: dict = {},
         critic_configs: dict = {},
         tau: float = 0.005,
@@ -486,9 +504,9 @@ class CoTASPLearner(SACLearner):
         target_update_period: int = 1,
         target_entropy: Optional[float] = None,
         init_temperature: float = 1.0):
-        super(CoTASPLearner, self).__init__(seed, observations, actions, optim_configs,
-              actor_configs, critic_configs, discount, tau, target_update_period,
-              target_entropy, init_temperature)
+        super(CoTASPLearner, self).__init__(seed, observations, actions, pi_opt_configs,
+              q_opt_configs, t_opt_configs, actor_configs, critic_configs, discount, 
+              tau, target_update_period, target_entropy, init_temperature)
 
         action_dim = actions.shape[-1]
 
@@ -500,7 +518,7 @@ class CoTASPLearner(SACLearner):
         actor = MPNTrainState.create(
             apply_fn=actor_def.apply,
             params=actor_params,
-            tx=utils_fn.set_optimizer(**optim_configs)
+            tx=utils_fn.set_optimizer(**pi_opt_configs)
         )
 
         if load_policy_dir is not None:
@@ -559,6 +577,16 @@ class CoTASPLearner(SACLearner):
                 # Replace the i-th row
                 actor_params[k]['embedding'] = actor_params[k]['embedding'].at[task_id].set(alpha_l)
         self.actor = self.actor.update_params(freeze(actor_params))
+        
+    def rand_net_distill(self, task_id: int, batch: Batch) -> InfoDict:
+        
+        new_rng, new_actor, info = _rand_net_distill(
+            self.rng, task_id, self.param_masks, self.actor, batch
+        )
+        
+        self.rng = new_rng
+        self.actor = new_actor
+        return info
 
     def sample_actions(self,
                        observations: np.ndarray,
@@ -577,10 +605,7 @@ class CoTASPLearner(SACLearner):
         if not self.update_coef:
             optimize_alpha = False
             
-        if self.step % self.target_update_period == 0:
-            update_target = True
-        else:
-            update_target = False
+        update_target = self.step % self.target_update_period == 0
 
         new_rng, new_actor, new_temp, new_critic, new_target_critic, info = _update_cotasp_jit(
             self.rng, task_id, self.tau, self.discount, self.target_entropy, optimize_alpha, 
@@ -599,7 +624,7 @@ class CoTASPLearner(SACLearner):
 
     def reset_agent(self):
         # re-initialize params of critic ,target_critic and temperature
-        self.rng, key_critic, key_temp, key_actor = jax.random.split(self.rng, 4)
+        self.rng, key_critic, key_temp = jax.random.split(self.rng, 3)
 
         self.critic = utils_fn.reset_model(
             self.critic, 
@@ -625,17 +650,21 @@ class CoTASPLearner(SACLearner):
         #     adaptive_init=True
         # )
         # re-initialize log_std_layer's params
-        self.rng, new_params = utils_fn.reset_logstd_layer(
-            key_actor,
-            self.actor.params,
-            self.actor_cfgs['state_dependent_std']
-        )
-        self.actor = self.actor.update_params(new_params)
+        # self.rng, new_params = utils_fn.reset_logstd_layer(
+        #     key_actor,
+        #     self.actor.params,
+        #     self.actor_cfgs['final_fc_init_scale'],
+        #     self.actor_cfgs['state_dependent_std']
+        # )
+        # self.actor = self.actor.update_params(new_params)
 
         # reset optimizers
-        self.actor = self.actor.reset_optimizer()
-        self.critic = self.critic.reset_optimizer()
         self.temp = self.temp.reset_optimizer()
+        self.critic = self.critic.reset_optimizer()
+        self.reset_actor_optimizer()
+        
+    def reset_actor_optimizer(self):
+        self.actor = self.actor.reset_optimizer()
 
     def end_task(self, task_id: int, save_actor_dir: str, save_dict_dir: str):
         self.step = 0
@@ -649,7 +678,6 @@ class CoTASPLearner(SACLearner):
         self.cumul_masks = tree_map(
             lambda a, b: jnp.maximum(a, b), self.cumul_masks, current_masks
         )
-
         # To condition the training of task t + 1, we compute 
         # the gradient masks according to cumulative binary masks
         grad_masks = self.get_grad_masks(
@@ -690,21 +718,6 @@ class CoTASPLearner(SACLearner):
 
         return dict_stats
 
-    def freeze_task_params(self, task_id):
-        self.rng, _, dicts = _sample_actions(self.rng, self.actor, 
-                                             self.dummy_o, jnp.array([task_id]))
-        current_masks = dicts['masks']
-        # cumulative attention from all the previous tasks
-        self.cumul_masks = tree_map(
-            lambda a, b: jnp.maximum(a, b), self.cumul_masks, current_masks
-        )
-
-        # To condition the training of task t + 1, we compute 
-        # the gradient masks according to cumulative binary masks
-        grad_masks = self.get_grad_masks(
-            {'params': self.actor.params}, self.cumul_masks)
-        self.param_masks = freeze(grad_masks)
-
 
 class TaDeLL(SACLearner):
     def __init__(
@@ -714,7 +727,9 @@ class TaDeLL(SACLearner):
         actions: jnp.ndarray,
         load_dict_dir: Optional[str] = None,
         dict_configs: dict = {},
-        optim_configs: dict = {},
+        pi_opt_configs: dict = {},
+        q_opt_configs: dict = {},
+        t_opt_configs: dict = {},
         actor_configs: dict = {},
         critic_configs: dict = {},
         tau: float = 0.005,
@@ -722,9 +737,9 @@ class TaDeLL(SACLearner):
         target_update_period: int = 1,
         target_entropy: Optional[float] = None,
         init_temperature: float = 1.0):
-        super(TaDeLL, self).__init__(seed, observations, actions, optim_configs,
-              actor_configs, critic_configs, discount, tau, target_update_period,
-              target_entropy, init_temperature)
+        super(TaDeLL, self).__init__(seed, observations, actions, pi_opt_configs,
+              q_opt_configs, t_opt_configs, actor_configs, critic_configs, discount, 
+              tau, target_update_period, target_entropy, init_temperature)
 
         flat_actor_params, pack_fn = ravel_pytree(unfreeze(self.actor.params))
         feature_dim = len(flat_actor_params) + 384

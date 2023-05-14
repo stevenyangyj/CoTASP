@@ -22,7 +22,7 @@ class Temperature(nn.Module):
         log_temp = self.param('log_temp',
                               init_fn=lambda key: jnp.full(
                                   (), self.init_log_temp))
-        return jnp.exp(temp_activation(log_temp))
+        return jnp.exp(log_temp)
 
 
 def update(temp: TrainState, entropy: float,

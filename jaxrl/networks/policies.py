@@ -4,7 +4,6 @@ from typing import Any, Callable, Optional, Sequence, Tuple
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-import jax.random as random
 import numpy as np
 from jax import custom_jvp
 from tensorflow_probability.substrates import jax as tfp
@@ -13,14 +12,14 @@ tfd = tfp.distributions
 tfb = tfp.bijectors
 
 from jaxrl.networks.common import MLP, Params, PRNGKey, \
-    default_init, activation_fn, RMSNorm
+    default_init, activation_fn, MaskedLayerNorm
 
 # from common import MLP, Params, PRNGKey, default_init, \
 #     activation_fn, RMSNorm, create_mask, zero_grads
 
 
-LOG_STD_MAX = 5
-LOG_STD_MIN = -5
+LOG_STD_MAX = 2
+LOG_STD_MIN = -2
 
 
 class MSEPolicy(nn.Module):
@@ -140,10 +139,10 @@ class NormalTanhPolicy(nn.Module):
 
         # Avoid numerical issues by limiting the mean of the Gaussian
         # to be in [-clip_mean, clip_mean]
-        means = jnp.where(
-            means > self.clip_mean, self.clip_mean, 
-            jnp.where(means < -self.clip_mean, -self.clip_mean, means)
-        )
+        # means = jnp.where(
+        #     means > self.clip_mean, self.clip_mean, 
+        #     jnp.where(means < -self.clip_mean, -self.clip_mean, means)
+        # )
 
         # numerically stable method
         base_dist = tfd.Normal(loc=means, scale=jnp.exp(log_stds) * temperature)
@@ -152,7 +151,7 @@ class NormalTanhPolicy(nn.Module):
             return tfd.Independent(TanhTransformedDistribution(base_dist), 
                                    reinterpreted_batch_ndims=1)
         else:
-            return base_dist
+            return base_dist, {'means': means, 'stddev': jnp.exp(log_stds)}
 
 
 @custom_jvp
@@ -213,7 +212,7 @@ class MetaPolicy(nn.Module):
             self.log_std_layer = nn.Dense(
                 self.action_dim, 
                 kernel_init=default_init(self.final_fc_init_scale),
-                use_bias=False)
+            )
         else:
             self.log_std_layer = self.param(
                 'log_std_layer', nn.initializers.zeros, 
@@ -221,10 +220,9 @@ class MetaPolicy(nn.Module):
             )
 
         self.activation = activation_fn(self.name_activation)
+        self.tanh = activation_fn('tanh')
         if self.use_layer_norm:
-            self.layer_norm = nn.LayerNorm(use_bias=False, use_scale=False)
-        else:
-            self.layer_norm = None
+            self.masked_ln = MaskedLayerNorm(use_bias=False, use_scale=False)
 
     def __call__(self,
                  x: jnp.ndarray,
@@ -235,23 +233,16 @@ class MetaPolicy(nn.Module):
             x = layer(x)
             # straight-through estimator
             phi_l = ste_step_fn(self.embeds_bb[i](t))
+            mask_l = jnp.broadcast_to(phi_l, x.shape)
+            masks[layer.name] = mask_l
             # masking outputs
-            x *= jnp.broadcast_to(phi_l, x.shape)
-            # default normalization
-            # if i == 0 and self.use_layer_norm:
-            #     x = self.normalizer(x)
-            #     x = nn.tanh(x)
-            # else:
-            #     x = self.activation(x)
-            # layer-normalize each layer's output 
-            # except the last one
-            if self.use_layer_norm and (i + 1) < len(self.backbones):
-                x = self.layer_norm(x)
+            x *= mask_l
+            if self.use_layer_norm and i == 0:
+                # layer-normalize output 
+                x = self.masked_ln(x, mask_l)
+                x = self.tanh(x)
             else:
-                x = self.layer_norm(x)
-                x *= jnp.broadcast_to(phi_l, x.shape)
-            x = self.activation(x)
-            masks[layer.name] = phi_l
+                x = self.activation(x)
         
         means = self.mean_layer(x)
 
@@ -265,42 +256,46 @@ class MetaPolicy(nn.Module):
         else:
             log_stds = self.log_std_layer
 
-        # clip log_std
+        # squashing log_std
         log_std_min = self.log_std_min or LOG_STD_MIN
         log_std_max = self.log_std_max or LOG_STD_MAX
-        # log_stds = jnp.clip(log_stds, log_std_min, log_std_max)
         log_stds = sigma_activation(log_stds, log_std_min, log_std_max)
-        
-        # numerically unstable method for unbounded means
-        # base_dist = tfd.MultivariateNormalDiag(loc=means,
-        #                                        scale_diag=jnp.exp(log_stds) *
-        #                                        temperature)
 
         # numerically stable method
-        base_dist = tfd.Normal(loc=means, scale=jnp.exp(log_stds) * temperature)
+        base_dist = tfd.Normal(loc=means, scale=jax.nn.softplus(log_stds) * temperature)
 
         if self.tanh_squash:
             return tfd.Independent(TanhTransformedDistribution(base_dist), 
-                                   reinterpreted_batch_ndims=1), {'masks': masks, 'means': means}
+                                   reinterpreted_batch_ndims=1), {
+                                    'masks': masks, 
+                                    'means': means, 
+                                    'stddev': jax.nn.softplus(log_stds)
+                                   }
         else:
-            return base_dist, {'masks': masks, 'means': means}
+            return base_dist, {'masks': masks, 'means': means, 'stddev': jax.nn.softplus(log_stds)}
 
     def get_grad_masks(self, masks: dict, input_dim: int = 12):
         grad_masks = {}
         for i, layer in enumerate(self.backbones):
             if i == 0:
                 post_m = masks[layer.name]
-                kernel_e = jnp.broadcast_to(post_m, (input_dim, self.hidden_dims[i]))
-                grad_masks[(layer.name, 'kernel')] = 1 - kernel_e
+                grad_masks[(layer.name, 'kernel')] = 1 - jnp.broadcast_to(
+                    post_m, (input_dim, self.hidden_dims[i])
+                )
                 grad_masks[(layer.name, 'bias')] = 1 - post_m.flatten()
+                pre_m = masks[layer.name]
             else:
                 post_m = masks[layer.name]
-                kernel_e = jnp.broadcast_to(post_m, (self.hidden_dims[i-1], self.hidden_dims[i]))
-                grad_masks[(layer.name, 'kernel')] = 1 - kernel_e
+                grad_masks[(layer.name, 'kernel')] = 1 - jnp.minimum(
+                    jnp.broadcast_to(pre_m.reshape(-1, 1), (self.hidden_dims[i-1], self.hidden_dims[i])),
+                    jnp.broadcast_to(post_m, (self.hidden_dims[i-1], self.hidden_dims[i]))
+                )
                 grad_masks[(layer.name, 'bias')] = 1 - post_m.flatten()
+                pre_m = masks[layer.name]
 
-        kernel_e = jnp.broadcast_to(post_m.reshape(-1, 1), (self.hidden_dims[-1], self.action_dim))
-        grad_masks[(self.mean_layer.name, 'kernel')] = 1 - kernel_e
+        grad_masks[(self.mean_layer.name, 'kernel')] = 1 - jnp.broadcast_to(
+            pre_m.reshape(-1, 1), (self.hidden_dims[-1], self.action_dim)
+        )
         
         return grad_masks
 
@@ -379,66 +374,3 @@ def sample_actions(
         distribution: str = 'log_prob') -> Tuple[PRNGKey, jnp.ndarray]:
     return _sample_actions(rng, actor_apply_fn, actor_params, observations,
                            temperature, distribution)
-
-
-if __name__ == "__main__":
-    import optax
-
-    actor = MetaPolicy(
-        hidden_dims=(256, 256, 256, 256),
-        action_dim=4,
-        task_num=20,
-        state_dependent_std=False,
-        use_layer_norm=False)
-    
-    rng, key = random.split(random.PRNGKey(0))
-    variables = actor.init(
-        key, jnp.ones((1, 12)), jnp.array([0])
-    )
-    _, params = variables.pop('params')
-    print(params)
-
-    # tx = optax.multi_transform({'train': optax.adam(0.1), 'fix': optax.set_to_zero()},
-    #     create_mask(params, ['backbones', 'mean', 'log']))
-    # opt_state = tx.init(params)
-
-    # apply_jit = jax.jit(actor.apply)
-    # dist, dicts = apply_jit(variables, jnp.ones((3, 12)), jnp.array([0]), 1e-5)
-
-    # def get_grad_masks(actor, masks):
-    #     g_masks = actor.get_grad_masks(masks)
-    #     return g_masks
-    # get_grad_masks_jit = jax.jit(nn.apply(get_grad_masks, actor))
-    # grad_masks = get_grad_masks_jit(variables, masks)
-
-    # def loss(params):
-    #     dist, _ = actor.apply({'params': params}, jnp.ones((3, 12)), jnp.array([0]))
-    #     samples = dist.sample(seed=random.PRNGKey(0))
-    #     return jnp.sum(samples)
-
-    # grads = jax.grad(loss)(params)
-
-    # updates, opt_state = tx.update(grads, opt_state, params)
-    # new_params = optax.apply_updates(params, updates)
-
-    # compares = jax.tree_util.tree_map(lambda x, y: x == y, params, new_params)
-    # print(compares)
-    # for k in grad_masks.keys():
-    #     print(k)
-    #     if k == 'mean_layer':
-    #         assert (grads[k]['kernel'].shape == grad_masks[k]['kernel'].shape)
-    #     else:
-    #         assert (grads[k]['kernel'].shape == grad_masks[k]['kernel'].shape)
-    #         assert (grads[k]['bias'].shape == grad_masks[k]['bias'].shape)
-
-    # print(dicts['masks'])
-
-    # @jax.jit
-    # def top_k_fn(data):
-    #     return jax.lax.top_k(data, k=2)
-
-    # a = jnp.array([[1, 2, 3, 4, 5]])
-    # b = jnp.array([[1,2,3,4,5], [5,4,3,2,1]])
-    # x, y = top_k_fn(a)
-    # print(x)
-    # print(jnp.take_along_axis(b, y, axis=1))
