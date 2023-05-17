@@ -97,6 +97,20 @@ class NormalizeReward(gym.core.Wrapper):
         """
         self._update_reward_estimate(reward)
         return reward / (np.sqrt(self._reward_var) + self.epsilon)
+    
+    
+class RescaleReward(gym.core.Wrapper):
+    '''
+    This wrapper will rescale immediate rewards based on a constant factor.
+    '''
+    def __init__(self, env: gym.Env, reward_scale: float = 1.0):
+        super().__init__(env)
+        self.reward_scale = reward_scale
+        
+    def step(self, action):
+        obs, rews, dones, infos = self.env.step(action)
+        rews = rews * self.reward_scale
+        return obs, rews, dones, infos
 
 
 if __name__ == "__main__":

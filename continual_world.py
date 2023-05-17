@@ -7,7 +7,7 @@ from gym.wrappers import TimeLimit
 
 from jaxrl import wrappers
 
-from jaxrl.wrappers.normalization import NormalizeReward
+from jaxrl.wrappers.normalization import RescaleReward
 
 def get_mt50() -> metaworld.MT50:
     saved_random_state = np.random.get_state()
@@ -138,7 +138,7 @@ def get_single_env(
         env = TimeLimit(env, META_WORLD_TIME_HORIZON)
     env = gym.wrappers.ClipAction(env)
     if normalize_reward:
-        env = NormalizeReward(env)
+        env = RescaleReward(env, reward_scale=1.0 / META_WORLD_TIME_HORIZON)
     if add_episode_monitor:
         env = wrappers.EpisodeMonitor(env)
     return env

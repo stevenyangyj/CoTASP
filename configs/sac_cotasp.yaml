@@ -5,16 +5,14 @@ actor_configs:
   hidden_dims: !!python/tuple
   - 1024
   - 1024
-  - 1024
-  - 1024
-  name_activation: leaky_relu
+  name_activation: relu
   state_dependent_std: true
   use_layer_norm: true
 critic_configs:
   hidden_dims: !!python/tuple
   - 256
   - 256
-  name_activation: leaky_relu
+  name_activation: relu
   use_layer_norm: true
 # dictionaries
 update_coef: true
@@ -27,9 +25,9 @@ dict_configs:
   scale_code: false
 # optimizers
 pi_opt_configs:
-  clip_method: global_clip
+  clip_method: none
   lr: 0.0003
-  max_norm: 1.0
+  max_norm: -1
   optim_algo: adam
 q_opt_configs:
   clip_method: none
@@ -42,7 +40,7 @@ t_opt_configs:
   max_norm: -1
   optim_algo: adam
 # SAC misc
-init_temperature: 1.0
+init_temperature: 0.0
 target_update_period: 1
 target_entropy: -2.0
 tau: 0.005

@@ -238,29 +238,6 @@ def _update_alpha(
         q = jnp.minimum(q1, q2)
         actor_loss = (log_probs * temp() - q).mean()
 
-        # if finetune:
-        #     # masking regularization
-        #     reg = 0
-        #     count = 0
-        #     if first_task:
-        #         for m_k in dicts['masks']:
-        #             reg += dicts['masks'][m_k]['embedding'].sum()
-        #             count += dicts['masks'][m_k]['embedding'].size
-        #     else:
-        #         for m_k in dicts['masks']:
-        #             aux = 1 - cumul_mask[m_k]['embedding']
-        #             reg += (dicts['masks'][m_k]['embedding'] * aux).sum()
-        #             count += aux.sum()
-        #     regularizer = reg / count * jax.lax.stop_gradient(0.5 * jnp.sqrt(jnp.abs(q).mean()))
-
-        #     actor_loss += regularizer
-
-        # Modified Differential Method of Multipliers
-        # epi = -target_entropy
-        # damp = damping * jax.lax.stop_gradient(epi - log_probs.mean())
-        # temperature = temp.apply_fn({'params': temp_params})
-        # actor_loss = -q.mean() - (temperature - damp) * (epi - log_probs.mean())
-
         _info = {
             'hac_sac_loss': actor_loss,
             'entropy': -log_probs.mean(),
@@ -279,23 +256,6 @@ def _update_alpha(
     for p, v in param_mask.items():
         if p[-1] == 'kernel':
             actor_info['used_capacity_'+p[0]] = 1.0 - jnp.mean(v)
-
-    # global clipping
-    # trigger = jnp.squeeze(g_norm < 1.0)
-    # def global_clip_fn(t):
-    #     return jax.lax.select(trigger, t, (t / g_norm.astype(t.dtype)) * 1.0)
-    # grads_actor = tree_map(global_clip_fn, grads_actor)
-
-    # Masking gradients according to cumulative binary masks
-    # unfrozen_grads = unfreeze(grads_actor)
-    # for path, value in param_mask.items():
-    #     cursor = unfrozen_grads
-    #     for key in path[:-1]:
-    #         if key in cursor:
-    #             cursor = cursor[key]
-    #     cursor[path[-1]] *= value
-    
-    # actor_info['masked_g_norm_actor'] = global_norm(unfrozen_grads)
 
     # only update coefficients (alpha)
     new_actor = actor.apply_grads_alpha(grads=grads_actor)
@@ -337,12 +297,6 @@ def _update_theta(
         if p[-1] == 'kernel':
             actor_info['used_capacity_'+p[0]] = 1.0 - jnp.mean(v)
 
-    # global clipping
-    # trigger = jnp.squeeze(g_norm < 1.0)
-    # def global_clip_fn(t):
-    #     return jax.lax.select(trigger, t, (t / g_norm.astype(t.dtype)) * 1.0)
-    # grads_actor = tree_map(global_clip_fn, grads_actor)
-
     # Masking gradients according to cumulative binary masks
     unfrozen_grads = unfreeze(grads_actor)
     for path, value in param_mask.items():
@@ -351,8 +305,6 @@ def _update_theta(
             if key in cursor:
                 cursor = cursor[key]
         cursor[path[-1]] *= value
-
-    # actor_info['masked_g_norm_actor'] = global_norm(unfrozen_grads)
     
     # only update policy parameters (theta)
     new_actor = actor.apply_grads_theta(grads=freeze(unfrozen_grads))
