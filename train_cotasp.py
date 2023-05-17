@@ -30,7 +30,7 @@ flags.DEFINE_integer('eval_episodes', 10, 'Number of episodes used for evaluatio
 flags.DEFINE_integer('log_interval', 200, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
 flags.DEFINE_integer('batch_size', 128, 'Mini batch size.')
-flags.DEFINE_integer('updates_per_step', 1, 'Gradient updating per # environment steps.')
+flags.DEFINE_integer('updates_per_step', 50, 'Gradient updating per # environment steps.')
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 flags.DEFINE_integer('max_step', int(1e6), 'Number of training steps for each task')
 flags.DEFINE_integer('start_training', int(1e4), 'Number of training steps to start training.')
@@ -41,7 +41,7 @@ flags.DEFINE_boolean('rnd_explore', True, 'random policy distillation')
 flags.DEFINE_integer('distill_steps', int(2e4), 'distillation steps')
 
 flags.DEFINE_boolean('tqdm', False, 'Use tqdm progress bar.')
-flags.DEFINE_string('wandb_mode', 'disabled', 'Track experiments with Weights and Biases.')
+flags.DEFINE_string('wandb_mode', 'online', 'Track experiments with Weights and Biases.')
 flags.DEFINE_string('wandb_project_name', "CoTASP_ContiWorld", "The wandb's project name.")
 flags.DEFINE_string('wandb_entity', None, "the entity (team) of wandb's project")
 flags.DEFINE_boolean('save_checkpoint', False, 'Save meta-policy network parameters')
@@ -144,13 +144,11 @@ def main(_):
         replay_buffer = ReplayBuffer(
             env.observation_space, env.action_space, FLAGS.buffer_size or FLAGS.max_step
         )
+        # reset scheduler
+        schedule = itertools.cycle([False]*FLAGS.theta_step + [True]*FLAGS.alpha_step)
         # reset environment
         observation, done = env.reset(), False
-        for idx, optimize_alpha in enumerate(
-            itertools.islice(
-                itertools.cycle([False]*FLAGS.theta_step + [True]*FLAGS.alpha_step), FLAGS.max_step
-            )
-        ):
+        for idx in range(FLAGS.max_step):
             if idx < FLAGS.start_training:
                 # initial exploration strategy proposed in ClonEX-SAC
                 if task_idx == 0:
@@ -194,7 +192,7 @@ def main(_):
             if (idx >= FLAGS.start_training) and (idx % FLAGS.updates_per_step == 0):
                 for _ in range(FLAGS.updates_per_step):
                     batch = replay_buffer.sample(FLAGS.batch_size)
-                    update_info = agent.update(task_idx, batch, optimize_alpha)
+                    update_info = agent.update(task_idx, batch, next(schedule))
                 if idx % FLAGS.log_interval == 0:
                     for k, v in update_info.items():
                         wandb.log({f'training/{k}': v, 'global_steps': total_env_steps})
