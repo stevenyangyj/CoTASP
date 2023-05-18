@@ -200,28 +200,28 @@ def reset_free_params(
 
 
 def set_optimizer(
-    lr: float, 
-    max_norm: float, 
-    optim_algo: str='adam', 
+    optim_algo: str='adam',
     clip_method: str='global_clip',
-    decay_coeff: Optional[float]=None) -> optax.GradientTransformation:
+    max_norm: float=1.0, 
+    opt_kargs: dict={},
+    ) -> optax.GradientTransformation:
 
     if optim_algo == 'adam':
-        optimizer = optax.adam(learning_rate=lr)
+        optimizer = optax.adam(**opt_kargs)
     elif optim_algo == 'adamw':
-        optimizer = optax.adamw(learning_rate=lr, weight_decay=decay_coeff)
+        optimizer = optax.adamw(**opt_kargs)
     elif optim_algo == 'lamb':
-        optimizer = optax.lamb(learning_rate=lr)
+        optimizer = optax.lamb(**opt_kargs)
     elif optim_algo == 'sgd':
-        optimizer = optax.sgd(learning_rate=lr)
+        optimizer = optax.sgd(**opt_kargs)
     elif optim_algo == 'radam':
-        optimizer = optax.radam(learning_rate=lr)
+        optimizer = optax.radam(**opt_kargs)
     elif optim_algo == 'adabelief':
-        optimizer = optax.adabelief(learning_rate=lr)
+        optimizer = optax.adabelief(**opt_kargs)
     elif optim_algo == 'amsgrad':
-        optimizer = optax.amsgrad(learning_rate=lr)
+        optimizer = optax.amsgrad(**opt_kargs)
     elif optim_algo == 'lion':
-        optimizer = lion(learning_rate=lr, weight_decay=0)
+        optimizer = lion(**opt_kargs)
     else:
         raise NotImplementedError
 
