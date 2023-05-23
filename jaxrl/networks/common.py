@@ -28,8 +28,8 @@ Axes = Union[int, Any]
 InfoDict = Dict[str, float]
 
 
-def default_init(scale: Optional[float] = 1.0):
-    return nn.initializers.variance_scaling(scale, 'fan_in', 'normal')
+def default_init(scale: Optional[float] = 2.0):
+    return nn.initializers.variance_scaling(scale, 'fan_in', 'truncated_normal')
 
 
 def activation_fn(name: str = 'lrelu'):
@@ -420,12 +420,16 @@ class MLP(nn.Module):
         for i, size in enumerate(self.hidden_dims):
             x = nn.Dense(size, kernel_init=default_init())(x)
             # whether using layer normalization
-            if i == 0 and self.use_layer_norm:
+            # if i == 0 and self.use_layer_norm:
+            #     x = nn.LayerNorm()(x)
+            #     x = nn.tanh(x)
+            # else:
+            #     if i + 1 < len(self.hidden_dims) or self.activate_final:
+            #         x = self.activations(x)
+            if i + 1 < len(self.hidden_dims) and self.use_layer_norm:
                 x = nn.LayerNorm()(x)
-                x = nn.tanh(x)
-            else:
-                if i + 1 < len(self.hidden_dims) or self.activate_final:
-                    x = self.activations(x)
+            if i + 1 < len(self.hidden_dims) or self.activate_final:
+                x = self.activations(x)
         return x
 
 

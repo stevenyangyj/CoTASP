@@ -578,13 +578,13 @@ class CoTASPLearner(SACLearner):
         # re-initialize params of critic ,target_critic and temperature
         self.rng, key_critic, key_temp = jax.random.split(self.rng, 3)
 
-        # self.critic = utils_fn.reset_model(
-        #     self.critic, 
-        #     critic_net.DoubleCritic,
-        #     self.critic_cfgs,
-        #     [key_critic, self.dummy_o, self.dummy_a])
+        self.critic = utils_fn.reset_model(
+            self.critic, 
+            critic_net.DoubleCritic,
+            self.critic_cfgs,
+            [key_critic, self.dummy_o, self.dummy_a])
 
-        # self.target_critic = self.target_critic.update_params(self.critic.params)
+        self.target_critic = self.target_critic.update_params(self.critic.params)
 
         self.temp = utils_fn.reset_model(
             self.temp,

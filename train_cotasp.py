@@ -15,13 +15,12 @@ from ml_collections import config_flags, ConfigDict
 from jaxrl.datasets import ReplayBuffer
 from jaxrl.evaluation import evaluate_cl
 from jaxrl.utils import Logger
-
 from jaxrl.agents.sac.sac_learner import CoTASPLearner
 from continual_world import TASK_SEQS, get_single_env
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string('env_name', 'cw20', 'Environment name.')
-flags.DEFINE_integer('seed', 68, 'Random seed.')
+flags.DEFINE_integer('seed', 96, 'Random seed.')
 flags.DEFINE_string('base_algo', 'cotasp', 'base learning algorithm')
 
 flags.DEFINE_string('env_type', 'random_init_all', 'The type of env is either deterministic or random_init_all')
@@ -29,8 +28,8 @@ flags.DEFINE_boolean('normalize_reward', True, 'Normalize rewards')
 flags.DEFINE_integer('eval_episodes', 10, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('log_interval', 200, 'Logging interval.')
 flags.DEFINE_integer('eval_interval', 20000, 'Eval interval.')
-flags.DEFINE_integer('batch_size', 128, 'Mini batch size.')
-flags.DEFINE_integer('updates_per_step', 50, 'Gradient updating per # environment steps.')
+flags.DEFINE_integer('batch_size', 256, 'Mini batch size.')
+flags.DEFINE_integer('updates_per_step', 1, 'Gradient updating per # environment steps.')
 flags.DEFINE_integer('buffer_size', int(1e6), 'Size of replay buffer')
 flags.DEFINE_integer('max_step', int(1e6), 'Number of training steps for each task')
 flags.DEFINE_integer('start_training', int(1e4), 'Number of training steps to start training.')
