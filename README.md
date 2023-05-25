@@ -19,6 +19,21 @@ Refer to [this repo](https://github.com/awarelab/continual_world) for the instal
 python train_cotasp.py
 ```
 
+## Reproducibility
+Tracked experiments on CW20 via [Weights & Biases](https://api.wandb.ai/links/yang-yj/5kbiuz7h).
+
+## Citing CoTASP
+If you use the code in CoTASP, please kindly cite our paper using following BibTeX entry.
+```
+@inproceedings{
+yang2023cotasp,
+title={Continual Task Allocation in Meta-Policy Network via Sparse Prompting},
+author={Yijun Yang and Tianyi Zhou and Jing Jiang and Guodong Long and Yuhui Shi},
+booktitle={International Conference on Machine Learning},
+year={2023}
+}
+```
+
 ## Acknowledgement
 We appreciate the open source of the following projects:
 
