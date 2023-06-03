@@ -148,7 +148,12 @@ class OnlineDictLearner(object):
 
     def get_next_codes(self):
         return np.zeros((1, self._n_components))
-
+    
+    
+def clip_by_norm(x, c):
+    clip_coef = c / (np.linalg.norm(x) + 1e-6)
+    clip_coef_clipped = min(1.0, clip_coef)
+    return x * clip_coef_clipped
 
 def _update_dict(
     dictionary,
@@ -231,9 +236,8 @@ def _update_dict(
         if positive:
             np.clip(dictionary[k], 0, None, out=dictionary[k])
 
-        # Projection on the constraint set ||V_k|| <= c
-        dictionary[k] /= max(np.linalg.norm(dictionary[k]), 1)
-        dictionary[k] *= c
+        # Projection on the constraint set ||V_k||_2 <= c
+        dictionary[k] = clip_by_norm(dictionary[k], c)
 
     if verbose and n_unused > 0:
         print(f"{n_unused} unused atoms resampled.")
@@ -262,10 +266,10 @@ class OnlineDictLearnerV2(object):
 
         if init_sample is None:
             dictionary = self.rng.normal(loc=0.0, scale=scale, size=(n_components, n_features))
-            # Projection on the constraint set ||V_k|| <= c
+            # Projection on the constraint set ||V_k||_2 <= c
             for j in range(n_components):
-                dictionary[j] /= max(np.linalg.norm(dictionary[j]), 1)
-                dictionary[j] *= c
+                dictionary[j] = clip_by_norm(dictionary[j], c)
+                
         else:
             _, S, dictionary = randomized_svd(init_sample, n_components, random_state=self.rng)
             dictionary = S[:, np.newaxis] * dictionary
@@ -422,67 +426,71 @@ class OnlineDictLearnerV2(object):
 
 
 if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    from sentence_transformers import SentenceTransformer
+    x = np.ones(5) * 0.1
+    print(np.linalg.norm(x))
+    print(np.linalg.norm(clip_by_norm(x, 2.0)))
+    
+    # import matplotlib.pyplot as plt
+    # from sentence_transformers import SentenceTransformer
 
-    model = SentenceTransformer('all-MiniLM-L12-v2')
+    # model = SentenceTransformer('all-MiniLM-L12-v2')
 
-    # task hints
-    hints = [
-        'Hammer a screw on the wall.',
-        'Bypass a wall and push a puck to a goal.',
-        'Rotate the faucet clockwise.',
-        'Pull a puck to a goal.',
-        'Grasp a stick and pull a box with the stick.',
-        'Press a handle down sideways.',
-        'Push the puck to a goal.',
-        'Pick and place a puck onto a shelf.',
-        'Push and close a window.',
-        'Unplug a peg sideways.',
-        'Hammer a screw on the wall.',
-        'Bypass a wall and push a puck to a goal.',
-        'Rotate the faucet clockwise.',
-        'Pull a puck to a goal.',
-        'Grasp a stick and pull a box with the stick.',
-        'Press a handle down sideways.',
-        'Push the puck to a goal.',
-        'Pick and place a puck onto a shelf.',
-        'Push and close a window.',
-        'Unplug a peg sideways.'
-    ]
-    task_idx = [
-        'task 1', 'task 2', 'task 3', 'task 4', 'task 5',
-        'task 6', 'task 7', 'task 8', 'task 9', 'task 10',
-        'task 11', 'task 12', 'task 13', 'task 14', 'task 15',
-        'task 15', 'task 17', 'task 18', 'task 19', 'task 20'
-    ]
+    # # task hints
+    # hints = [
+    #     'Hammer a screw on the wall.',
+    #     'Bypass a wall and push a puck to a goal.',
+    #     'Rotate the faucet clockwise.',
+    #     'Pull a puck to a goal.',
+    #     'Grasp a stick and pull a box with the stick.',
+    #     'Press a handle down sideways.',
+    #     'Push the puck to a goal.',
+    #     'Pick and place a puck onto a shelf.',
+    #     'Push and close a window.',
+    #     'Unplug a peg sideways.',
+    #     'Hammer a screw on the wall.',
+    #     'Bypass a wall and push a puck to a goal.',
+    #     'Rotate the faucet clockwise.',
+    #     'Pull a puck to a goal.',
+    #     'Grasp a stick and pull a box with the stick.',
+    #     'Press a handle down sideways.',
+    #     'Push the puck to a goal.',
+    #     'Pick and place a puck onto a shelf.',
+    #     'Push and close a window.',
+    #     'Unplug a peg sideways.'
+    # ]
+    # task_idx = [
+    #     'task 1', 'task 2', 'task 3', 'task 4', 'task 5',
+    #     'task 6', 'task 7', 'task 8', 'task 9', 'task 10',
+    #     'task 11', 'task 12', 'task 13', 'task 14', 'task 15',
+    #     'task 15', 'task 17', 'task 18', 'task 19', 'task 20'
+    # ]
 
-    init_embedding = model.encode('Press a handle down sideways.')
+    # init_embedding = model.encode('Press a handle down sideways.')
 
-    dict_learner = OnlineDictLearnerV2(
-        n_features=384,
-        n_components=1024,
-        seed=0,
-        init_sample=None,
-        c=1.0,
-        alpha=1e-3,
-        method='lasso_lars',
-        positive_code=True,
-        scale_code=False,
-        verbose=True)
+    # dict_learner = OnlineDictLearnerV2(
+    #     n_features=384,
+    #     n_components=1024,
+    #     seed=0,
+    #     init_sample=None,
+    #     c=1.0,
+    #     alpha=1e-3,
+    #     method='lasso_lars',
+    #     positive_code=True,
+    #     scale_code=False,
+    #     verbose=True)
 
-    # mimic training stage
-    for idx, hint_task in enumerate(hints):
-        print(idx+1, hint_task)
-        task_embedding = model.encode(hint_task)
+    # # mimic training stage
+    # for idx, hint_task in enumerate(hints):
+    #     print(idx+1, hint_task)
+    #     task_embedding = model.encode(hint_task)
 
-        # compute code for current task
-        code = dict_learner.get_alpha(task_embedding[np.newaxis, :])
+    #     # compute code for current task
+    #     code = dict_learner.get_alpha(task_embedding[np.newaxis, :])
 
-        # mimic RL finetuning
-        code += np.random.normal(size=code.shape) * 1.0
-        code = np.clip(code, 0, 10.0)
+    #     # mimic RL finetuning
+    #     code += np.random.normal(size=code.shape) * 1.0
+    #     code = np.clip(code, 0, 10.0)
 
-        # online update dictionary via CD
-        dict_learner.update_dict(code, task_embedding[np.newaxis, :])
+    #     # online update dictionary via CD
+    #     dict_learner.update_dict(code, task_embedding[np.newaxis, :])
     
