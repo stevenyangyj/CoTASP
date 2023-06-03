@@ -1,5 +1,5 @@
 # CoTASP
-Code for "**Co**ntinual **T**ask **A**llocation in Meta-Policy Network via **S**parse **P**rompting", presented in ICML 2023.
+Code for "[**Co**ntinual **T**ask **A**llocation in Meta-Policy Network via **S**parse **P**rompting](https://arxiv.org/abs/2305.18444)", presented in ICML 2023.
 
 ## Key Dependencies
 ```console
