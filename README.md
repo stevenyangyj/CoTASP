@@ -25,12 +25,18 @@ Tracked experiments on CW20 via [Weights & Biases](https://api.wandb.ai/links/ya
 ## Citing CoTASP
 If you use the code in CoTASP, please kindly cite our paper using following BibTeX entry.
 ```
-@inproceedings{
-yang2023cotasp,
-title={Continual Task Allocation in Meta-Policy Network via Sparse Prompting},
-author={Yijun Yang and Tianyi Zhou and Jing Jiang and Guodong Long and Yuhui Shi},
-booktitle={International Conference on Machine Learning},
-year={2023}
+@InProceedings{pmlr-v202-yang23t,
+  title = 	 {Continual Task Allocation in Meta-Policy Network via Sparse Prompting},
+  author =       {Yang, Yijun and Zhou, Tianyi and Jiang, Jing and Long, Guodong and Shi, Yuhui},
+  booktitle = 	 {Proceedings of the 40th International Conference on Machine Learning},
+  pages = 	 {39623--39638},
+  year = 	 {2023},
+  volume = 	 {202},
+  series = 	 {Proceedings of Machine Learning Research},
+  month = 	 {23--29 Jul},
+  publisher =    {PMLR},
+  pdf = 	 {https://proceedings.mlr.press/v202/yang23t/yang23t.pdf},
+  url = 	 {https://proceedings.mlr.press/v202/yang23t.html},
 }
 ```
 
