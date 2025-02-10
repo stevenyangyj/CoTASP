@@ -2,6 +2,7 @@
 Code for "[**Co**ntinual **T**ask **A**llocation in Meta-Policy Network via **S**parse **P**rompting](https://arxiv.org/abs/2305.18444)", presented in ICML 2023.
 
 ## Key Dependencies
+The some of dependencies are outdated, e.g., the ones listed below. You **might** need to install their latest version to run this project.
 ```console
 python==3.7.13
 - jax==0.3.17
